@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: linux/amd64,linux/arm64
+      docker-compose-context: 
+        description: Where the compose file context is
+        required: false
+        type: string
+        default: .
       docker-compose-file-name:
         description: Compose file used by docker buildx bake.
         required: false
@@ -130,6 +135,7 @@ jobs:
       # Force docker/bake-action to use ONLY GHCR by rewriting compose image references to ghcr.io/owner/repo
       - name: Rewrite compose images to GHCR only
         shell: bash
+        working-directory: ${{ inputs.docker-compose-context }}
         env:
           GHCR_IMAGE_BASE: ${{ steps.vars.outputs.ghcr_image_base }}
           FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
@@ -370,6 +376,7 @@ jobs:
 
       - name: Rewrite compose images to GHCR only
         shell: bash
+        working-directory: ${{ inputs.docker-compose-context }}
         env:
           GHCR_IMAGE_BASE: ${{ steps.merge_vars.outputs.ghcr_image_base }}
           FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
@@ -565,6 +572,7 @@ jobs:
 
       - name: Rewrite compose images to GHCR only
         shell: bash
+        working-directory: ${{ inputs.docker-compose-context }}
         env:
           GHCR_IMAGE_BASE: ${{ steps.vars.outputs.ghcr_image_base }}
           FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
