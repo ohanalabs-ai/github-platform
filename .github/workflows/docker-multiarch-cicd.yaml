@@ -2,6 +2,11 @@
 on:
   workflow_call:
     inputs:
+      github-actions-runner:
+        description: Where to run
+        required: false
+        type: string
+        default: ubuntu-latest
       registry:
         description: Default registry for all builds.
         required: false
@@ -79,7 +84,7 @@ jobs:
     name: 🏗️ pr-build 
     timeout-minutes: 10
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.github-actions-runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -278,7 +283,7 @@ jobs:
     name: 🗑️ delete
     timeout-minutes: 5
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.github-actions-runner }}
     permissions:
       contents: write
       packages: write
@@ -319,7 +324,7 @@ jobs:
     name: 🚀 pr-merge
     timeout-minutes: 10
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.github-actions-runner }}
     steps:
       - name: Checkout merged base branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -515,7 +520,7 @@ jobs:
     name: 🏷️ release 
     timeout-minutes: 10
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.github-actions-runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
