@@ -542,7 +542,7 @@ jobs:
 
       - name: Build and attest by ref
         id: ref_build
-        uses: ./actions/docker-ref-build
+        uses: vionix-proj/actions/actions/docker-ref-build@main
         with:
           registry: ${{ env.REGISTRY }}
           platforms: ${{ env.PLATFORMS }}
@@ -575,7 +575,7 @@ jobs:
 
       - name: Build and attest for release tag
         id: release_ref_build
-        uses: ./actions/docker-ref-build
+        uses: vionix-proj/actions/actions/docker-ref-build@main
         with:
           registry: ${{ env.REGISTRY }}
           platforms: ${{ env.PLATFORMS }}
