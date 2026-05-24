@@ -1,0 +1,133 @@
+name: Docker ref build
+runs:
+  using: composite
+  steps:
+    - name: Loads docker compose properties
+      id: compose-metadata
+      uses: vionix-proj/actions/docker/compose/metadata@main
+      with:
+        compose-path: ${{ inputs.docker-compose-file-name }}
+
+    - name: Verify bake targets from compose file
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Using compose file: ${{ inputs.docker-compose-file-name }}"
+        test -f "${{ inputs.docker-compose-file-name }}" || (echo "::error::Compose file not found"; ls -la; exit 1)
+        docker buildx version
+        docker buildx bake -f "${{ inputs.docker-compose-file-name }}" --print
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+    - name: Set up Buildx
+      id: buildx
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+    - name: Login to GHCR
+      uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+
+    - name: Rewrite compose images to GHCR only
+      shell: bash
+      working-directory: ${{ inputs.docker-compose-context }}
+      env:
+        GHCR_IMAGE_BASE: ${{ inputs.image-base }}
+        FILE: ${{ inputs.docker-compose-file-name }}
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+        import os, re
+        path = os.environ["FILE"]
+        ghcr = os.environ["GHCR_IMAGE_BASE"]
+        with open(path, "r", encoding="utf-8") as f:
+          s = f.read()
+        s2, n = re.subn(r'(?m)^(?P<indent>\s*)image:\s*.+$', r'\g<indent>image: ' + ghcr, s)
+        with open(path, "w", encoding="utf-8") as f:
+          f.write(s2)
+        print(f"Rewrote {n} image field(s) in {path}")
+        PY
+
+    - name: Docker metadata - labels only
+      id: meta
+      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+      with:
+        images: ${{ inputs.image-base }}
+        labels: |
+          org.opencontainers.image.title=${{ github.event.repository.name }}
+          org.opencontainers.image.description=${{ inputs.image-description }}
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+        flavor: latest=false
+
+    - name: Build and push
+      id: bake
+      uses: docker/bake-action@4a9a8d494466d37134e2bfca2d3a8de8fb2681ad
+      with:
+        files: |
+          ${{ inputs.docker-compose-file-name }}
+          ${{ steps.meta.outputs.bake-file-labels }}
+        targets: ${{ steps.compose-metadata.outputs.target-service }}
+        push: true
+        builder: ${{ steps.buildx.outputs.name }}
+        set: |
+          ${{ steps.compose-metadata.outputs.target-service }}.platform=${{ inputs.platforms }}
+          ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ inputs.tags }}
+          ${{ steps.compose-metadata.outputs.target-service }}.cache-from=type=gha,scope=${{ steps.compose-metadata.outputs.target-service }}
+          ${{ steps.compose-metadata.outputs.target-service }}.cache-to=type=gha,mode=max,scope=${{ steps.compose-metadata.outputs.target-service }}
+
+    - name: Resolve image digest
+      id: digest
+      shell: bash
+      env:
+        TARGET_SERVICE: ${{ steps.compose-metadata.outputs.target-service }}
+      run: |
+        set -euo pipefail
+        META_JSON='${{ steps.bake.outputs.metadata }}'
+        DIGEST=$(printf '%s' "$META_JSON" | jq -r --arg t "$TARGET_SERVICE" '.[$t]["containerimage.digest"] // empty')
+        if [ -z "$DIGEST" ]; then
+          echo "::error::Digest not found in bake metadata"; exit 1
+        fi
+        echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+    - name: Attest build provenance
+      uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8
+      with:
+        subject-name: ${{ inputs.image-base }}
+        subject-digest: ${{ steps.digest.outputs.digest }}
+        push-to-registry: ${{ inputs.push-attestations }}
+        show-summary: true
+
+    - name: Generate SBOM
+      uses: anchore/sbom-action@v0.17.3
+      with:
+        image: ${{ inputs.image-base }}@${{ steps.digest.outputs.digest }}
+        output-file: ${{ inputs.sbom-file }}
+
+    - name: Attest SBOM
+      uses: actions/attest-sbom@5026d3663739160db546203eeaffa6aa1c51a4d6
+      with:
+        subject-name: ${{ inputs.image-base }}
+        subject-digest: ${{ steps.digest.outputs.digest }}
+        sbom-path: ${{ inputs.sbom-file }}
+        push-to-registry: ${{ inputs.push-attestations }}
+        show-summary: true
+
+inputs:
+  registry: { required: true }
+  platforms: { required: true }
+  docker-compose-context: { required: true }
+  docker-compose-file-name: { required: true }
+  image-base: { required: true }
+  image-description: { required: true }
+  tags: { required: true }
+  push-attestations: { required: true }
+  sbom-file: { required: true }
+outputs:
+  digest:
+    value: ${{ steps.digest.outputs.digest }}
+  labels:
+    value: ${{ steps.meta.outputs.labels }}

@@ -523,29 +523,46 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
+  ref-build:
+    name: 🧱 ref-build
+    timeout-minutes: 10
+    if: github.event_name == 'push' && (github.ref_type == 'branch' || github.ref_type == 'tag')
+    runs-on: ${{ inputs.github-actions-runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Compute vars
+        id: vars
+        shell: bash
+        run: |
+          echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "ref_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "ghcr_image_base=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Build and attest by ref
+        id: ref_build
+        uses: ./actions/docker-ref-build
+        with:
+          registry: ${{ env.REGISTRY }}
+          platforms: ${{ env.PLATFORMS }}
+          docker-compose-context: ${{ inputs.docker-compose-context }}
+          docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
+          image-base: ${{ steps.vars.outputs.ghcr_image_base }}
+          image-description: Ref build for ${{ github.ref_type }} ${{ steps.vars.outputs.ref_name }}
+          tags: |
+            ${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.ref_name }}-${{ steps.vars.outputs.short_sha }}
+          push-attestations: ${{ env.PUSH_ATTESTATIONS }}
+          sbom-file: sbom-ref.spdx.json
+
   release-build:
-    name: 🏷️ release 
+    name: 🏷️ release
     timeout-minutes: 10
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ${{ inputs.github-actions-runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - name: Loads docker compose properties
-        id: compose-metadata
-        uses: vionix-proj/actions/docker/compose/metadata@main
-        with:
-          compose-path: ${{ inputs.docker-compose-file-name }}
-
-      - name: Verify bake targets from compose file
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Using compose file: ${{ env.DOCKER_COMPOSE_FILE_NAME }}"
-          test -f "${{ env.DOCKER_COMPOSE_FILE_NAME }}" || (echo "::error::Compose file not found"; ls -la; exit 1)
-          docker buildx version
-          docker buildx bake -f "${{ env.DOCKER_COMPOSE_FILE_NAME }}" --print
 
       - name: Compute vars
         id: vars
@@ -556,134 +573,22 @@ jobs:
           echo "ghcr_image_base=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
           echo "dockerhub_repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-
-      - name: Set up Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
-      - name: Login to GHCR
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+      - name: Build and attest for release tag
+        id: release_ref_build
+        uses: ./actions/docker-ref-build
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          platforms: ${{ env.PLATFORMS }}
+          docker-compose-context: ${{ inputs.docker-compose-context }}
+          docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
+          image-base: ${{ steps.vars.outputs.ghcr_image_base }}
+          image-description: Release build for tag ${{ steps.vars.outputs.tag }}
+          tags: |
+            ${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}
+            ${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}-${{ steps.vars.outputs.short_sha }}
+          push-attestations: ${{ env.PUSH_ATTESTATIONS }}
+          sbom-file: sbom-tag.spdx.json
 
-      - name: Rewrite compose images to GHCR only
-        shell: bash
-        working-directory: ${{ inputs.docker-compose-context }}
-        env:
-          GHCR_IMAGE_BASE: ${{ steps.vars.outputs.ghcr_image_base }}
-          FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os, re
-          path = os.environ["FILE"]
-          ghcr = os.environ["GHCR_IMAGE_BASE"]
-          with open(path, "r", encoding="utf-8") as f:
-            s = f.read()
-          s2, n = re.subn(r'(?m)^(?P<indent>\s*)image:\s*.+$', r'\g<indent>image: ' + ghcr, s)
-          if n == 0:
-            print(f"::warning::No 'image:' fields found in {path}.")
-          with open(path, "w", encoding="utf-8") as f:
-            f.write(s2)
-          print(f"Rewrote {n} image field(s) in {path}")
-          PY
-
-      - name: Docker metadata (tag) - labels only
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ${{ steps.vars.outputs.ghcr_image_base }}
-          labels: |
-            org.opencontainers.image.title=${{ github.event.repository.name }}
-            org.opencontainers.image.description=Release build for tag ${{ steps.vars.outputs.tag }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          flavor: latest=false
-
-      # IMPORTANT: Push only tag and tag-shortsha (do not push latest unless explicitly desired)
-      - name: Build and push (tag) -> push tag and tag-shortsha
-        id: bake_tag
-        uses: docker/bake-action@4a9a8d494466d37134e2bfca2d3a8de8fb2681ad # v5.13.0
-        with:
-          files: |
-            ${{ env.DOCKER_COMPOSE_FILE_NAME }}
-            ${{ steps.meta.outputs.bake-file-labels }}
-          targets: ${{ steps.compose-metadata.outputs.target-service }}
-          push: true
-          builder: ${{ steps.buildx.outputs.name }}
-          set: |
-            ${{ steps.compose-metadata.outputs.target-service }}.platform=${{ env.PLATFORMS }}
-            ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}
-            ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}-${{ steps.vars.outputs.short_sha }}
-            ${{ steps.compose-metadata.outputs.target-service }}.cache-from=type=gha,scope=${{ steps.compose-metadata.outputs.target-service }}
-            ${{ steps.compose-metadata.outputs.target-service }}.cache-to=type=gha,mode=max,scope=${{ steps.compose-metadata.outputs.target-service }}
-
-      - name: Resolve image digest (tag)
-        id: tag_digest
-        shell: bash
-        env:
-          TARGET_SERVICE: ${{ steps.compose-metadata.outputs.target-service }}
-        run: |
-          set -euo pipefail
-          META_JSON='${{ steps.bake_tag.outputs.metadata }}'
-          IMAGE_BASE="${{ steps.vars.outputs.ghcr_image_base }}"
-          DIGEST=$(printf '%s' "$META_JSON" | jq -r --arg t "$TARGET_SERVICE" '.[$t]["containerimage.digest"] // empty')
-          if [ -z "$DIGEST" ]; then
-            echo "::error::Digest not found in bake metadata"; exit 1
-          fi
-          echo "image_base=$IMAGE_BASE" >> "$GITHUB_OUTPUT"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-
-      - name: Attest build provenance (tag)
-        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
-        with:
-          subject-name: ${{ steps.tag_digest.outputs.image_base }}
-          subject-digest: ${{ steps.tag_digest.outputs.digest }}
-          push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
-          show-summary: true
-
-      - name: Generate SBOM (tag)
-        id: sbom_tag
-        uses: anchore/sbom-action@v0.17.3
-        with:
-          image: ${{ steps.tag_digest.outputs.image_base }}@${{ steps.tag_digest.outputs.digest }}
-          output-file: sbom-tag.spdx.json
-
-      - name: Attest SBOM (tag)
-        uses: actions/attest-sbom@5026d3663739160db546203eeaffa6aa1c51a4d6 # v1.4.1
-        with:
-          subject-name: ${{ steps.tag_digest.outputs.image_base }}
-          subject-digest: ${{ steps.tag_digest.outputs.digest }}
-          sbom-path: sbom-tag.spdx.json
-          push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
-          show-summary: true
-
-      - name: Summarize build metadata (tag)
-        shell: bash
-        run: |
-          {
-            echo "### Docker image metadata (tag ${{ steps.vars.outputs.tag }})";
-            echo "";
-            echo "- Image: ${{ steps.tag_digest.outputs.image_base }}";
-            echo "- Digest: ${{ steps.tag_digest.outputs.digest }}";
-            echo "";
-            echo "Tags:";
-            echo '```';
-            echo "${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}";
-            echo "${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}-${{ steps.vars.outputs.short_sha }}";
-            echo '```';
-            echo "Labels:";
-            echo '```';
-            echo "${{ steps.meta.outputs.labels }}";
-            echo '```';
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # Optional: also publish the SAME manifest list to Docker Hub, but only if DOCKER_REGISTRY_TOKEN exists.
-      # This does NOT rebuild: it copies the already-pushed multi-arch manifest from GHCR to Docker Hub.
       - name: Docker Hub creds (optional)
         id: dh_creds
         shell: bash
@@ -713,27 +618,12 @@ jobs:
         if: steps.dh_creds.outputs.enabled == 'true'
         shell: bash
         env:
-          GHCR_IMAGE: ${{ steps.tag_digest.outputs.image_base }}
-          DIGEST: ${{ steps.tag_digest.outputs.digest }}
+          GHCR_IMAGE: ${{ steps.vars.outputs.ghcr_image_base }}
+          DIGEST: ${{ steps.release_ref_build.outputs.digest }}
           DOCKERHUB_REPO: ${{ steps.vars.outputs.dockerhub_repo }}
           TAG: ${{ steps.vars.outputs.tag }}
           SHORT_SHA: ${{ steps.vars.outputs.short_sha }}
         run: |
           set -euo pipefail
-
-          # Copy the manifest list by digest from GHCR -> Docker Hub.
-          # Requires buildx imagetools (provided by setup-buildx-action).
           SRC="${GHCR_IMAGE}@${DIGEST}"
-
-          echo "Copying ${SRC} -> docker.io/${DOCKERHUB_REPO}:${TAG}"
-          docker buildx imagetools create \
-            -t "docker.io/${DOCKERHUB_REPO}:${TAG}" \
-            -t "docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}" \
-            "${SRC}"
-
-          echo "Docker Hub publish complete."
-
-          echo "### Docker Hub publish" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Source: ${SRC}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Published: docker.io/${DOCKERHUB_REPO}:${TAG}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Published: docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools create             -t "docker.io/${DOCKERHUB_REPO}:${TAG}"             -t "docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}"             "${SRC}"
