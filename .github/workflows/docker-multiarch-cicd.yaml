@@ -585,7 +585,7 @@ jobs:
           image-description: Release build for tag ${{ steps.vars.outputs.tag }}
           tags: |
             ${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}
-            ${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}-${{ steps.vars.outputs.short_sha }}
+            ${{ steps.vars.outputs.ghcr_image_base }}:latest
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-tag.spdx.json
 
