@@ -587,6 +587,7 @@ jobs:
             ${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-tag.spdx.json
+          push-latest: true
 
       - name: Docker Hub creds (optional)
         id: dh_creds
