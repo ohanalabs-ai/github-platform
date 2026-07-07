@@ -618,7 +618,7 @@ jobs:
           set: |
             ${{ steps.compose-metadata.outputs.target-service }}.platform=${{ env.PLATFORMS }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}
-            ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}-${{ steps.vars.outputs.short_sha }}
+            ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}:latest
             ${{ steps.compose-metadata.outputs.target-service }}.cache-from=type=gha,scope=${{ steps.compose-metadata.outputs.target-service }}
             ${{ steps.compose-metadata.outputs.target-service }}.cache-to=type=gha,mode=max,scope=${{ steps.compose-metadata.outputs.target-service }}
 
@@ -641,7 +641,7 @@ jobs:
       - name: Attest build provenance (tag)
         uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
         with:
-          subject-name: ${{ steps.tag_digest.outputs.image_base }}
+          subject-name: ${{ steps.tag_digest.outputs.image_base }}:${{ steps.vars.outputs.tag }}
           subject-digest: ${{ steps.tag_digest.outputs.digest }}
           push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
           show-summary: true
@@ -656,7 +656,7 @@ jobs:
       - name: Attest SBOM (tag)
         uses: actions/attest-sbom@5026d3663739160db546203eeaffa6aa1c51a4d6 # v1.4.1
         with:
-          subject-name: ${{ steps.tag_digest.outputs.image_base }}
+          subject-name: ${{ steps.tag_digest.outputs.image_base }}:${{ steps.vars.outputs.tag }}
           subject-digest: ${{ steps.tag_digest.outputs.digest }}
           sbom-path: sbom-tag.spdx.json
           push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
@@ -674,7 +674,6 @@ jobs:
             echo "Tags:";
             echo '```';
             echo "${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}";
-            echo "${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.tag }}-${{ steps.vars.outputs.short_sha }}";
             echo '```';
             echo "Labels:";
             echo '```';
@@ -728,7 +727,6 @@ jobs:
           echo "Copying ${SRC} -> docker.io/${DOCKERHUB_REPO}:${TAG}"
           docker buildx imagetools create \
             -t "docker.io/${DOCKERHUB_REPO}:${TAG}" \
-            -t "docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}" \
             "${SRC}"
 
           echo "Docker Hub publish complete."
@@ -736,4 +734,3 @@ jobs:
           echo "### Docker Hub publish" >> "$GITHUB_STEP_SUMMARY"
           echo "- Source: ${SRC}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Published: docker.io/${DOCKERHUB_REPO}:${TAG}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Published: docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}" >> "$GITHUB_STEP_SUMMARY"
