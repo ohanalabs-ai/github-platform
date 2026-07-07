@@ -526,7 +526,7 @@ jobs:
   ref-build:
     name: 🧱 ref-build
     timeout-minutes: 10
-    if: github.event_name == 'push' && (github.ref_type == 'branch' || github.ref_type == 'tag')
+    if: github.event_name == 'push' && github.ref_type == 'branch'
     runs-on: ${{ inputs.github-actions-runner }}
     steps:
       - name: Checkout
