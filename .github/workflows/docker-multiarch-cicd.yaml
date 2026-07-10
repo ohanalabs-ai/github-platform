@@ -191,11 +191,14 @@ jobs:
         shell: bash
         env:
           TARGET_SERVICE: ${{ steps.compose-metadata.outputs.target-service }}
+          # Pass the bake metadata JSON through the environment (NOT inlined into the
+          # shell body). The multi-arch provenance embeds Dockerfile RUN commands with
+          # single quotes and $(...) which break a single-quoted bash string.
+          META_JSON: ${{ steps.bake_pr.outputs.metadata }}
+          IMAGE_BASE: ${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}
         run: |
           set -euo pipefail
-          META_JSON='${{ steps.bake_pr.outputs.metadata }}'
-          IMAGE_BASE="${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}"
-          DIGEST=$(printf '%s' "$META_JSON" | jq -r --arg t "$TARGET_SERVICE" '.[$t]["containerimage.digest"] // empty')
+          DIGEST=$(printf '%s' "$META_JSON" | jq -r --arg t "$TARGET_SERVICE" '.[$t]["containerimage.digest"] // .["containerimage.digest"] // empty')
           if [ -z "$DIGEST" ]; then
             echo "::error::Digest not found in bake metadata"; exit 1
           fi
@@ -430,11 +433,14 @@ jobs:
         shell: bash
         env:
           TARGET_SERVICE: ${{ steps.compose-metadata.outputs.target-service }}
+          # Pass the bake metadata JSON through the environment (NOT inlined into the
+          # shell body). The multi-arch provenance embeds Dockerfile RUN commands with
+          # single quotes and $(...) which break a single-quoted bash string.
+          META_JSON: ${{ steps.bake_merge.outputs.metadata }}
+          IMAGE_BASE: ${{ steps.merge_vars.outputs.ghcr_image_base }}
         run: |
           set -euo pipefail
-          META_JSON='${{ steps.bake_merge.outputs.metadata }}'
-          IMAGE_BASE="${{ steps.merge_vars.outputs.ghcr_image_base }}"
-          DIGEST=$(printf '%s' "$META_JSON" | jq -r --arg t "$TARGET_SERVICE" '.[$t]["containerimage.digest"] // empty')
+          DIGEST=$(printf '%s' "$META_JSON" | jq -r --arg t "$TARGET_SERVICE" '.[$t]["containerimage.digest"] // .["containerimage.digest"] // empty')
           if [ -z "$DIGEST" ]; then
             echo "::error::Digest not found in bake metadata"; exit 1
           fi
