@@ -56,7 +56,7 @@ on:
         type: string
       slsa-signer-workflow:
         description: Reusable workflow identity used to verify artifact attestations with gh attestation verify.
-        required: true
+        required: false
         type: string
         default: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
 
@@ -423,7 +423,8 @@ jobs:
         id: slsa_ref
         uses: vionix-proj/actions/docker/slsa-report@main
         with:
-          image-base: ${{ steps.build_vars.outputs.image_base }}
+          subject: ${{ steps.ref_build.outputs.subject }}
+          image-base: ${{ steps.ref_build.outputs.image-base }}
           digest: ${{ steps.ref_build.outputs.digest }}
           signer-workflow: ${{ inputs.slsa-signer-workflow }}
           ref-name: ${{ steps.build_vars.outputs.effective_ref }}
@@ -433,7 +434,7 @@ jobs:
         if: ${{ steps.build_vars.outputs.comment_enabled == 'true' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
-          IMAGE: ${{ steps.build_vars.outputs.image_base }}
+          IMAGE: ${{ steps.ref_build.outputs.image-base }}
           DIGEST: ${{ steps.ref_build.outputs.digest }}
           TAGS: |
             ${{ steps.build_vars.outputs.image_tag }}
@@ -504,7 +505,8 @@ jobs:
         id: slsa_release
         uses: vionix-proj/actions/docker/slsa-report@main
         with:
-          image-base: ${{ steps.vars.outputs.ghcr_image_base }}
+          subject: ${{ steps.release_ref_build.outputs.subject }}
+          image-base: ${{ steps.release_ref_build.outputs.image-base }}
           digest: ${{ steps.release_ref_build.outputs.digest }}
           signer-workflow: ${{ inputs.slsa-signer-workflow }}
           ref-name: ${{ steps.vars.outputs.tag }}
