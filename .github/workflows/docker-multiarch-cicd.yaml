@@ -289,7 +289,7 @@ jobs:
             }
 
   pr-delete:
-    name: 🗑️ delete
+    name: 🗑️ pr-delete
     timeout-minutes: 5
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
     runs-on: ${{ inputs.github-actions-runner }}
@@ -329,178 +329,101 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-on-merge:
-    name: 🚀 pr-merge
+  ref-build:
+    name: 🧱 ref-build
     timeout-minutes: 10
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    if: |
+      (github.event_name == 'push' && github.ref_type == 'branch') ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true)
     runs-on: ${{ inputs.github-actions-runner }}
+    outputs:
+      effective_ref: ${{ steps.build_vars.outputs.effective_ref }}
+      effective_sha: ${{ steps.build_vars.outputs.effective_sha }}
+      short_sha: ${{ steps.build_vars.outputs.short_sha }}
+      image_base: ${{ steps.build_vars.outputs.image_base }}
+      image_tag: ${{ steps.build_vars.outputs.image_tag }}
+      image_description: ${{ steps.build_vars.outputs.image_description }}
+      pr_number: ${{ steps.build_vars.outputs.pr_number }}
+      comment_enabled: ${{ steps.build_vars.outputs.comment_enabled }}
     steps:
-      - name: Checkout merged base branch
+      - name: Checkout effective branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
 
-      - name: Loads docker compose properties
-        id: compose-metadata
-        uses: vionix-proj/actions/docker/compose/metadata@main
-        with:
-          compose-path: ${{ inputs.docker-compose-file-name }}
-
-      - name: Verify bake targets from compose file
+      - name: Consolidate build vars
+        id: build_vars
         shell: bash
         run: |
           set -euo pipefail
-          echo "Using compose file: ${{ env.DOCKER_COMPOSE_FILE_NAME }}"
-          test -f "${{ env.DOCKER_COMPOSE_FILE_NAME }}" || (echo "::error::Compose file not found"; ls -la; exit 1)
-          docker buildx version
-          docker buildx bake -f "${{ env.DOCKER_COMPOSE_FILE_NAME }}" --print
 
-      - name: Compute vars (merge)
-        id: merge_vars
-        shell: bash
-        run: |
-          echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-          echo "branch=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
-          echo "ghcr_image_base=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-
-      - name: Set up Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
-      - name: Login to GHCR
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Rewrite compose images to GHCR only
-        shell: bash
-        working-directory: ${{ inputs.docker-compose-context }}
-        env:
-          GHCR_IMAGE_BASE: ${{ steps.merge_vars.outputs.ghcr_image_base }}
-          FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os, re
-          path = os.environ["FILE"]
-          ghcr = os.environ["GHCR_IMAGE_BASE"]
-          with open(path, "r", encoding="utf-8") as f:
-            s = f.read()
-          s2, n = re.subn(r'(?m)^(?P<indent>\s*)image:\s*.+$', r'\g<indent>image: ' + ghcr, s)
-          if n == 0:
-            print(f"::warning::No 'image:' fields found in {path}.")
-          with open(path, "w", encoding="utf-8") as f:
-            f.write(s2)
-          print(f"Rewrote {n} image field(s) in {path}")
-          PY
-
-      - name: Docker metadata (merge) - labels only
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ${{ steps.merge_vars.outputs.ghcr_image_base }}
-          labels: |
-            org.opencontainers.image.title=${{ github.event.repository.name }}
-            org.opencontainers.image.description=Publish on merge to ${{ steps.merge_vars.outputs.branch }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          flavor: latest=false
-
-      # IMPORTANT: Push ONLY branch-shortsha (no branch / no latest)
-      - name: Build and push (merge) -> push only branch-shortsha
-        id: bake_merge
-        uses: docker/bake-action@4a9a8d494466d37134e2bfca2d3a8de8fb2681ad # v5.13.0
-        with:
-          files: |
-            ${{ env.DOCKER_COMPOSE_FILE_NAME }}
-            ${{ steps.meta.outputs.bake-file-labels }}
-          targets: ${{ steps.compose-metadata.outputs.target-service }}
-          push: true
-          builder: ${{ steps.buildx.outputs.name }}
-          set: |
-            ${{ steps.compose-metadata.outputs.target-service }}.platform=${{ env.PLATFORMS }}
-            ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.merge_vars.outputs.ghcr_image_base }}:${{ steps.merge_vars.outputs.branch }}-${{ steps.merge_vars.outputs.short_sha }}
-            ${{ steps.compose-metadata.outputs.target-service }}.cache-from=type=gha,scope=${{ steps.compose-metadata.outputs.target-service }}
-            ${{ steps.compose-metadata.outputs.target-service }}.cache-to=type=gha,mode=max,scope=${{ steps.compose-metadata.outputs.target-service }}
-
-      - name: Resolve image digest (merge)
-        id: merge_digest
-        shell: bash
-        env:
-          TARGET_SERVICE: ${{ steps.compose-metadata.outputs.target-service }}
-          # Pass the bake metadata JSON through the environment (NOT inlined into the
-          # shell body). The multi-arch provenance embeds Dockerfile RUN commands with
-          # single quotes and $(...) which break a single-quoted bash string.
-          META_JSON: ${{ steps.bake_merge.outputs.metadata }}
-          IMAGE_BASE: ${{ steps.merge_vars.outputs.ghcr_image_base }}
-        run: |
-          set -euo pipefail
-          DIGEST=$(printf '%s' "$META_JSON" | jq -r --arg t "$TARGET_SERVICE" '.[$t]["containerimage.digest"] // .["containerimage.digest"] // empty')
-          if [ -z "$DIGEST" ]; then
-            echo "::error::Digest not found in bake metadata"; exit 1
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            EFFECTIVE_REF="${{ github.event.pull_request.base.ref }}"
+            EFFECTIVE_SHA="${{ github.event.pull_request.merge_commit_sha || github.sha }}"
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            COMMENT_ENABLED="true"
+            IMAGE_DESCRIPTION="Ref build for merged PR #${PR_NUMBER} to ${EFFECTIVE_REF}"
+          else
+            EFFECTIVE_REF="${GITHUB_REF_NAME}"
+            EFFECTIVE_SHA="${GITHUB_SHA}"
+            PR_NUMBER=""
+            COMMENT_ENABLED="false"
+            IMAGE_DESCRIPTION="Ref build for ${GITHUB_REF_TYPE} ${EFFECTIVE_REF}"
           fi
-          echo "image_base=$IMAGE_BASE" >> "$GITHUB_OUTPUT"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Attest build provenance (merge)
-        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
-        with:
-          subject-name: ${{ steps.merge_digest.outputs.image_base }}
-          subject-digest: ${{ steps.merge_digest.outputs.digest }}
-          push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
-          show-summary: true
+          SHORT_SHA="${EFFECTIVE_SHA::7}"
+          IMAGE_BASE="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE_TAG="${IMAGE_BASE}:${EFFECTIVE_REF}-${SHORT_SHA}"
 
-      - name: Generate SBOM (merge)
-        id: sbom_merge
-        uses: anchore/sbom-action@v0.17.3
-        with:
-          image: ${{ steps.merge_digest.outputs.image_base }}@${{ steps.merge_digest.outputs.digest }}
-          output-file: sbom-merge.spdx.json
+          echo "effective_ref=${EFFECTIVE_REF}" >> "$GITHUB_OUTPUT"
+          echo "effective_sha=${EFFECTIVE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_description=${IMAGE_DESCRIPTION}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "comment_enabled=${COMMENT_ENABLED}" >> "$GITHUB_OUTPUT"
 
-      - name: Attest SBOM (merge)
-        uses: actions/attest-sbom@5026d3663739160db546203eeaffa6aa1c51a4d6 # v1.4.1
-        with:
-          subject-name: ${{ steps.merge_digest.outputs.image_base }}
-          subject-digest: ${{ steps.merge_digest.outputs.digest }}
-          sbom-path: sbom-merge.spdx.json
-          push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
-          show-summary: true
-
-      - name: Summarize build metadata (merge)
+      - name: Summarize consolidated build vars
         shell: bash
         run: |
           {
-            echo "### Docker image metadata (merge to ${{ steps.merge_vars.outputs.branch }})";
+            echo "### Consolidated ref build values";
             echo "";
-            echo "- Image: ${{ steps.merge_digest.outputs.image_base }}";
-            echo "- Digest: ${{ steps.merge_digest.outputs.digest }}";
-            echo "";
-            echo "Tags:";
-            echo '```';
-            echo "${{ steps.merge_vars.outputs.ghcr_image_base }}:${{ steps.merge_vars.outputs.branch }}-${{ steps.merge_vars.outputs.short_sha }}";
-            echo '```';
-            echo "Labels:";
-            echo '```';
-            echo "${{ steps.meta.outputs.labels }}";
-            echo '```';
+            echo "- Effective ref: ${{ steps.build_vars.outputs.effective_ref }}";
+            echo "- Effective sha: ${{ steps.build_vars.outputs.effective_sha }}";
+            echo "- Short sha: ${{ steps.build_vars.outputs.short_sha }}";
+            echo "- Image base: ${{ steps.build_vars.outputs.image_base }}";
+            echo "- Image tag: ${{ steps.build_vars.outputs.image_tag }}";
+            echo "- Description: ${{ steps.build_vars.outputs.image_description }}";
+            echo "- PR number: ${{ steps.build_vars.outputs.pr_number || 'n/a' }}";
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Comment PR with build metadata (merge)
-      - name: Comment PR with build metadata (merge)
-        if: github.event_name == 'pull_request'
+      - name: Build and attest by ref
+        id: ref_build
+        uses: vionix-proj/actions/docker/ref-build@main
+        with:
+          registry: ${{ env.REGISTRY }}
+          platforms: ${{ env.PLATFORMS }}
+          docker-compose-context: ${{ inputs.docker-compose-context }}
+          docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
+          image-base: ${{ steps.build_vars.outputs.image_base }}
+          image-description: ${{ steps.build_vars.outputs.image_description }}
+          tags: |
+            ${{ steps.build_vars.outputs.image_tag }}
+          push-attestations: ${{ env.PUSH_ATTESTATIONS }}
+          sbom-file: sbom-ref.spdx.json
+
+      - name: Comment PR with build metadata
+        if: ${{ steps.build_vars.outputs.comment_enabled == 'true' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
-          IMAGE: ${{ steps.merge_digest.outputs.image_base }}
-          DIGEST: ${{ steps.merge_digest.outputs.digest }}
+          IMAGE: ${{ steps.build_vars.outputs.image_base }}
+          DIGEST: ${{ steps.ref_build.outputs.digest }}
           TAGS: |
-            ${{ steps.merge_vars.outputs.ghcr_image_base }}:${{ steps.merge_vars.outputs.branch }}-${{ steps.merge_vars.outputs.short_sha }}
-          LABELS: ${{ steps.meta.outputs.labels }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+            ${{ steps.build_vars.outputs.image_tag }}
+          PR_NUMBER: ${{ steps.build_vars.outputs.pr_number }}
+          REF_NAME: ${{ steps.build_vars.outputs.effective_ref }}
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -508,16 +431,12 @@ jobs:
             const marker = '<!-- docker-meta -->';
             const body = `${marker}
             ## Docker image metadata (merge)
+            - Ref: ${process.env.REF_NAME}
             - Image: ${process.env.IMAGE}
             - Digest: ${process.env.DIGEST}
             <details><summary>Tags</summary>
             \`\`\`
             ${process.env.TAGS}
-            \`\`\`
-            </details>
-            <details><summary>Labels</summary>
-            \`\`\`
-            ${process.env.LABELS}
             \`\`\`
             </details>
             `;
@@ -529,37 +448,6 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-  ref-build:
-    name: 🧱 ref-build
-    timeout-minutes: 10
-    if: github.event_name == 'push' && github.ref_type == 'branch'
-    runs-on: ${{ inputs.github-actions-runner }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - name: Compute vars
-        id: vars
-        shell: bash
-        run: |
-          echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-          echo "ref_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          echo "ghcr_image_base=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-
-      - name: Build and attest by ref
-        id: ref_build
-        uses: vionix-proj/actions/docker/ref-build@main
-        with:
-          registry: ${{ env.REGISTRY }}
-          platforms: ${{ env.PLATFORMS }}
-          docker-compose-context: ${{ inputs.docker-compose-context }}
-          docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
-          image-base: ${{ steps.vars.outputs.ghcr_image_base }}
-          image-description: Ref build for ${{ github.ref_type }} ${{ steps.vars.outputs.ref_name }}
-          tags: |
-            ${{ steps.vars.outputs.ghcr_image_base }}:${{ steps.vars.outputs.ref_name }}-${{ steps.vars.outputs.short_sha }}
-          push-attestations: ${{ env.PUSH_ATTESTATIONS }}
-          sbom-file: sbom-ref.spdx.json
 
   release-build:
     name: 🏷️ release
