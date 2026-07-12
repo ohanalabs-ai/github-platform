@@ -54,6 +54,11 @@ on:
         description: Optional Docker Hub registry token to publish images.
         required: false
         type: string
+      slsa-signer-workflow:
+        description: Reusable workflow identity used to verify artifact attestations with gh attestation verify.
+        required: true
+        type: string
+        default: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
 
 # Set of permissions needed by the workflow
 permissions:
@@ -414,6 +419,16 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-ref.spdx.json
 
+      - name: Verify SLSA provenance by ref
+        id: slsa_ref
+        uses: vionix-proj/actions/docker/slsa-report@main
+        with:
+          image-base: ${{ steps.build_vars.outputs.image_base }}
+          digest: ${{ steps.ref_build.outputs.digest }}
+          signer-workflow: ${{ inputs.slsa-signer-workflow }}
+          ref-name: ${{ steps.build_vars.outputs.effective_ref }}
+          title: SLSA verification (merge/ref build)
+
       - name: Comment PR with build metadata
         if: ${{ steps.build_vars.outputs.comment_enabled == 'true' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
@@ -424,6 +439,7 @@ jobs:
             ${{ steps.build_vars.outputs.image_tag }}
           PR_NUMBER: ${{ steps.build_vars.outputs.pr_number }}
           REF_NAME: ${{ steps.build_vars.outputs.effective_ref }}
+          SLSA_REPORT: ${{ steps.slsa_ref.outputs.summary_markdown }}
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -439,6 +455,8 @@ jobs:
             ${process.env.TAGS}
             \`\`\`
             </details>
+
+            ${process.env.SLSA_REPORT}
             `;
             const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
             const previous = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
@@ -447,7 +465,6 @@ jobs:
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
-
 
   release-build:
     name: 🏷️ release
@@ -482,6 +499,16 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-tag.spdx.json
           push-latest: true
+
+      - name: Verify SLSA provenance for release
+        id: slsa_release
+        uses: vionix-proj/actions/docker/slsa-report@main
+        with:
+          image-base: ${{ steps.vars.outputs.ghcr_image_base }}
+          digest: ${{ steps.release_ref_build.outputs.digest }}
+          signer-workflow: ${{ inputs.slsa-signer-workflow }}
+          ref-name: ${{ steps.vars.outputs.tag }}
+          title: SLSA verification (release build)
 
       - name: Docker Hub creds (optional)
         id: dh_creds
