@@ -7,6 +7,11 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+      github-job-timeout-minutes:
+        description: Allow more minutes to run, using 10 as the default timeout. Increase if required
+        type: number
+        default: 10
+        required: false
       registry:
         description: Default registry for all builds.
         required: false
@@ -92,7 +97,7 @@ concurrency:
 jobs:
   pr-build:
     name: 🏗️ pr-build 
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ${{ inputs.github-actions-runner }}
     steps:
@@ -337,7 +342,7 @@ jobs:
 
   ref-build:
     name: 🧱 ref-build
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
     if: |
       (github.event_name == 'push' && github.ref_type == 'branch') ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true)
@@ -471,7 +476,7 @@ jobs:
 
   release-build:
     name: 🏷️ release
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ${{ inputs.github-actions-runner }}
     steps:
