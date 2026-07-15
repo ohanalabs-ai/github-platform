@@ -309,36 +309,67 @@ jobs:
       packages: write
     steps:
       - name: Delete GHCR package for this PR
-        id: delete
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_OWNER: ${{ github.repository_owner }}
           OWNER_TYPE: ${{ github.event.repository.owner.type }}
           PKG_NAME: ${{ github.event.repository.name }}/pr/${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         shell: bash
         run: |
           ENCODED=$(jq -rn --arg s "$PKG_NAME" '$s|@uri')
+
           if [ "$OWNER_TYPE" = "Organization" ]; then
-            PATH="/orgs/${REPO_OWNER}/packages/container/${ENCODED}"
+            API_PATH="/orgs/${REPO_OWNER}/packages/container/${ENCODED}"
           else
-            PATH="/users/${REPO_OWNER}/packages/container/${ENCODED}"
+            API_PATH="/users/${REPO_OWNER}/packages/container/${ENCODED}"
           fi
 
-          echo "# 🗑️ Delete PR  Github Container Registry packages" >> $GITHUB_STEP_SUMMARY
-          echo "* Path: ${PATH}" >> $GITHUB_STEP_SUMMARY
-          echo "* Package Name: ${PKG_NAME}" >> $GITHUB_STEP_SUMMARY
-          echo "* API: ${GITHUB_API_URL}${PATH}" >> $GITHUB_STEP_SUMMARY
+          API_URL="${GITHUB_API_URL}${API_PATH}"
+          RESPONSE_BODY=$(mktemp)
 
-          echo "path=${PATH}" >> $GITHUB_OUTPUT
+          {
+            echo "# 🗑️ Delete PR GitHub Container Registry package"
+            echo "* Path: ${API_PATH}"
+            echo "* Package name: ${PKG_NAME}"
+            echo "* API: ${API_URL}"
+            echo "* Run attempt: ${RUN_ATTEMPT}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          #curl -sSfL -X DELETE -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${GITHUB_TOKEN}" "${GITHUB_API_URL}${PATH}"
+          HTTP_STATUS=$(
+            curl --silent --show-error \
+              --output "$RESPONSE_BODY" \
+              --write-out "%{http_code}" \
+              --request DELETE \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$API_URL"
+          )
 
-      - uses: octokit/request-action@v2.x
-        id: get_latest_release
-        with:
-          route: DELETE ${{ steps.delete.outputs.path }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          case "$HTTP_STATUS" in
+            204)
+              echo "✅ Deleted package '${PKG_NAME}'." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+
+            404)
+              WARNING="The PR #${PR_NUMBER} tags might have been removed before if this is a rerun of this job. Check the job history!"
+              echo "::warning title=GHCR package not found::${WARNING}"
+              echo "⚠️ ${WARNING}" >> "$GITHUB_STEP_SUMMARY"
+
+              if [ "$RUN_ATTEMPT" -gt 1 ]; then
+                echo "This is rerun attempt #${RUN_ATTEMPT}, so the package was probably deleted by an earlier attempt." \
+                  >> "$GITHUB_STEP_SUMMARY"
+              fi
+              ;;
+
+            *)
+              echo "::error title=Failed to delete GHCR package::GitHub API returned HTTP ${HTTP_STATUS}"
+              cat "$RESPONSE_BODY"
+              exit 1
+              ;;
+          esac
 
   ref-build:
     name: 🧱 ref-build
