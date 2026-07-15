@@ -847,6 +847,7 @@ jobs:
           REF_NAME: ${{ steps.report_vars.outputs.ref_name }}
           SUBJECT: ${{ steps.report_vars.outputs.subject }}
           VERIFIED: ${{ steps.report.outputs.verified }}
+          DECLARED_SLSA_BUILD_LEVEL: ${{ steps.report.outputs.declared_slsa_build_level }}
           REPORT: ${{ steps.report.outputs.summary_markdown }}
         run: |
           set -euo pipefail
@@ -865,6 +866,7 @@ jobs:
             echo "| Verified | \`${VERIFIED}\` |"
             echo "| Subject | \`${SUBJECT}\` |"
             echo "| Workflow run | [View workflow run](${WORKFLOW_RUN_URL}) |"
+            echo "| Declared SLSA Build level | \`${DECLARED_SLSA_BUILD_LEVEL}\` |"
             echo ""
             printf '%s\n' "${REPORT}"
           } >> "$GITHUB_STEP_SUMMARY"
