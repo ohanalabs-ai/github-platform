@@ -416,6 +416,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           platforms: ${{ env.PLATFORMS }}
+          ref-sha: ${{ steps.build_vars.outputs.effective_sha }}
           docker-compose-context: ${{ inputs.docker-compose-context }}
           docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
           target-service: ${{ inputs.docker-compose-target-service }}
@@ -487,6 +488,7 @@ jobs:
         id: vars
         shell: bash
         run: |
+          echo "sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
           echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           echo "ghcr_image_base=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
@@ -498,6 +500,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           platforms: ${{ env.PLATFORMS }}
+          ref-sha: ${{ steps.vars.outputs.sha }}
           docker-compose-context: ${{ inputs.docker-compose-context }}
           docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
           target-service: ${{ inputs.docker-compose-target-service }}
