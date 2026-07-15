@@ -59,6 +59,14 @@ on:
         description: Optional Docker Hub registry token to publish images.
         required: false
         type: string
+      slsa-build-level:
+        description: >-
+          User-declared SLSA Build level for this pipeline. This value is
+          reported as workflow policy and is not detected or certified by
+          gh attestation verify.
+        required: false
+        type: string
+        default: "2"
       slsa-signer-workflow:
         description: Reusable workflow identity used to verify artifact attestations with gh attestation verify.
         required: false
@@ -827,6 +835,7 @@ jobs:
           image-base: ${{ steps.report_vars.outputs.image_base }}
           digest: ${{ steps.report_vars.outputs.digest }}
           signer-workflow: ${{ inputs.slsa-signer-workflow }}
+          slsa-build-level: ${{ inputs.slsa-build-level }}
           ref-name: ${{ steps.report_vars.outputs.ref_name }}
           title: ${{ steps.report_vars.outputs.title }}
           fail-on-unverified: "true"
