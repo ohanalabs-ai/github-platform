@@ -598,7 +598,7 @@ jobs:
     runs-on: ${{ inputs.github-actions-runner }}
 
     permissions:
-      contents: read
+      contents: write
       packages: read
       attestations: read
       artifact-metadata: read
@@ -754,3 +754,87 @@ jobs:
                 body
               });
             }
+
+      - name: Add SLSA report to GitHub release
+        if: steps.report_vars.outputs.build_type == 'release'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          TAG_NAME: ${{ steps.report_vars.outputs.ref_name }}
+          IMAGE: ${{ steps.report_vars.outputs.image_base }}
+          DIGEST: ${{ steps.report_vars.outputs.digest }}
+          SUBJECT: ${{ steps.report_vars.outputs.subject }}
+          VERIFIED: ${{ steps.report.outputs.verified }}
+          SLSA_REPORT: ${{ steps.report.outputs.summary_markdown }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.TAG_NAME;
+            const markerStart = '<!-- slsa-report:start -->';
+            const markerEnd = '<!-- slsa-report:end -->';
+
+            let release;
+
+            try {
+              const response = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag
+              });
+
+              release = response.data;
+            } catch (error) {
+              if (error.status === 404) {
+                core.warning(
+                  `No GitHub release is associated with tag ${tag}. ` +
+                  'The SLSA report was generated but was not added to a release.'
+                );
+                return;
+              }
+
+              throw error;
+            }
+
+            const slsaSection = `${markerStart}
+            ## 🛡️ SLSA verification
+
+            - **Tag:** \`${tag}\`
+            - **Image:** \`${process.env.IMAGE}\`
+            - **Digest:** \`${process.env.DIGEST}\`
+            - **Subject:** \`${process.env.SUBJECT}\`
+            - **Verified:** ${process.env.VERIFIED}
+
+            ${process.env.SLSA_REPORT || ''}
+
+            ${markerEnd}`;
+
+            const currentBody = release.body || '';
+            const escapedStart = markerStart.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              '\\$&'
+            );
+            const escapedEnd = markerEnd.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              '\\$&'
+            );
+            const existingSection = new RegExp(
+              `${escapedStart}[\\s\\S]*?${escapedEnd}`,
+              'm'
+            );
+
+            const body = existingSection.test(currentBody)
+              ? currentBody.replace(existingSection, slsaSection)
+              : `${currentBody.trimEnd()}
+
+            ${slsaSection}`.trim();
+
+            await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              body
+            });
+
+            core.notice(
+              `Added the SLSA report to release ${release.name || tag}.`
+            );
+
