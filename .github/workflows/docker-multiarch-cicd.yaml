@@ -750,7 +750,6 @@ jobs:
           REF_DIGEST: ${{ needs['ref-build'].outputs.image_digest }}
           REF_NAME: ${{ needs['ref-build'].outputs.effective_ref }}
           REF_TITLE: ${{ needs['ref-build'].outputs.report_title }}
-
           RELEASE_RESULT: ${{ needs['release-build'].result }}
           RELEASE_SUBJECT: ${{ needs['release-build'].outputs.image_subject }}
           RELEASE_IMAGE_BASE: ${{ needs['release-build'].outputs.image_base }}
@@ -974,8 +973,8 @@ jobs:
           steps.report.outputs.verified == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
-          RELEASE_ID: ${{ needs['prepare-release'].outputs.release_id }}
-          RELEASE_URL: ${{ needs['prepare-release'].outputs.release_url }}
+          RELEASE_ID: ${{ needs['github-release'].outputs.release_id }}
+          RELEASE_URL: ${{ needs['github-release'].outputs.release_url }}
           TAG_NAME: ${{ steps.report_vars.outputs.ref_name }}
           IMAGE: ${{ steps.report_vars.outputs.image_base }}
           DIGEST: ${{ steps.report_vars.outputs.digest }}
