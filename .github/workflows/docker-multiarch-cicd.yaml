@@ -660,6 +660,13 @@ jobs:
             echo "build_type=${BUILD_TYPE}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Login to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
       - name: Verify SLSA provenance
         id: report
         uses: vionix-proj/actions/docker/slsa-report@main
