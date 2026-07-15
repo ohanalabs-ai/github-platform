@@ -579,23 +579,150 @@ jobs:
           SRC="${GHCR_IMAGE}@${DIGEST}"
           docker buildx imagetools create -t "docker.io/${DOCKERHUB_REPO}:${TAG}" -t "docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}" "${SRC}"
 
+  prepare-release:
+    name: 📝 prepare GitHub release
+    needs:
+      - release-build
+    if: ${{ needs.release-build.result == 'success' }}
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 5
+
+    permissions:
+      contents: write
+
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_url: ${{ steps.release.outputs.release_url }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      release_draft: ${{ steps.release.outputs.release_draft }}
+      release_prerelease: ${{ steps.release.outputs.release_prerelease }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+
+    steps:
+      - name: Find or create draft GitHub release
+        id: release
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          TAG_NAME: ${{ needs.release-build.outputs.effective_ref }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.TAG_NAME;
+
+            if (!tag) {
+              core.setFailed(
+                'The release-build job did not provide an effective_ref tag.'
+              );
+              return;
+            }
+
+            let release;
+            let created = false;
+
+            try {
+              const response = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag
+              });
+
+              release = response.data;
+
+              core.info(
+                `Found existing GitHub Release for tag ${tag}: ` +
+                `${release.html_url}`
+              );
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              const prerelease =
+                /(?:^|[-.])(alpha|beta|rc|pre)(?:[-.\d]|$)/i.test(tag);
+
+              core.info(
+                `No GitHub Release exists for tag ${tag}; ` +
+                'creating a draft release.'
+              );
+
+              const response = await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                name: tag,
+                draft: true,
+                prerelease,
+                generate_release_notes: true
+              });
+
+              release = response.data;
+              created = true;
+
+              core.notice(
+                `Created draft GitHub Release for ${tag}: ` +
+                `${release.html_url}`
+              );
+            }
+
+            core.setOutput('release_id', String(release.id));
+            core.setOutput('release_url', release.html_url);
+            core.setOutput('release_created', String(created));
+            core.setOutput('release_draft', String(release.draft));
+            core.setOutput(
+              'release_prerelease',
+              String(release.prerelease)
+            );
+            core.setOutput('tag_name', release.tag_name);
+
+      - name: Summarize prepared release
+        shell: bash
+        env:
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          RELEASE_DRAFT: ${{ steps.release.outputs.release_draft }}
+          RELEASE_PRERELEASE: ${{ steps.release.outputs.release_prerelease }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## 📝 GitHub Release prepared"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Tag | \`${TAG_NAME}\` |"
+            echo "| Release ID | \`${RELEASE_ID}\` |"
+            echo "| Created by this run | \`${RELEASE_CREATED}\` |"
+            echo "| Draft | \`${RELEASE_DRAFT}\` |"
+            echo "| Prerelease | \`${RELEASE_PRERELEASE}\` |"
+            echo "| Release | [View GitHub Release](${RELEASE_URL}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
   slsa-report:
     name: 🛡️ SLSA report
-    timeout-minutes: 5
     needs:
       - ref-build
       - release-build
+      - prepare-release
 
-    # One of the build jobs will always be skipped. Without always(), this job
-    # would also be skipped because of the skipped dependency.
+    # For a ref event, release-build and prepare-release are skipped.
+    # For a tag event, ref-build is skipped.
+    # always() prevents those expected skips from automatically skipping
+    # this job.
     if: |
       always() &&
       (
-        needs.ref-build.result == 'success' ||
-        needs.release-build.result == 'success'
+        needs['ref-build'].result == 'success' ||
+        (
+          needs['release-build'].result == 'success' &&
+          needs['prepare-release'].result == 'success'
+        )
       )
 
     runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 5
 
     permissions:
       contents: write
@@ -609,31 +736,34 @@ jobs:
         id: report_vars
         shell: bash
         env:
-          REF_SUBJECT: ${{ needs.ref-build.outputs.image_subject }}
-          REF_IMAGE_BASE: ${{ needs.ref-build.outputs.image_base }}
-          REF_DIGEST: ${{ needs.ref-build.outputs.image_digest }}
-          REF_NAME: ${{ needs.ref-build.outputs.effective_ref }}
-          REF_TITLE: ${{ needs.ref-build.outputs.report_title }}
+          REF_RESULT: ${{ needs['ref-build'].result }}
+          REF_SUBJECT: ${{ needs['ref-build'].outputs.image_subject }}
+          REF_IMAGE_BASE: ${{ needs['ref-build'].outputs.image_base }}
+          REF_DIGEST: ${{ needs['ref-build'].outputs.image_digest }}
+          REF_NAME: ${{ needs['ref-build'].outputs.effective_ref }}
+          REF_TITLE: ${{ needs['ref-build'].outputs.report_title }}
 
-          RELEASE_SUBJECT: ${{ needs.release-build.outputs.image_subject }}
-          RELEASE_IMAGE_BASE: ${{ needs.release-build.outputs.image_base }}
-          RELEASE_DIGEST: ${{ needs.release-build.outputs.image_digest }}
-          RELEASE_REF_NAME: ${{ needs.release-build.outputs.effective_ref }}
-          RELEASE_TITLE: ${{ needs.release-build.outputs.report_title }}
+          RELEASE_RESULT: ${{ needs['release-build'].result }}
+          RELEASE_SUBJECT: ${{ needs['release-build'].outputs.image_subject }}
+          RELEASE_IMAGE_BASE: ${{ needs['release-build'].outputs.image_base }}
+          RELEASE_DIGEST: ${{ needs['release-build'].outputs.image_digest }}
+          RELEASE_REF_NAME: ${{ needs['release-build'].outputs.effective_ref }}
+          RELEASE_TITLE: ${{ needs['release-build'].outputs.report_title }}
         run: |
           set -euo pipefail
 
-          if [ "${{ needs.release-build.result }}" = "success" ]; then
+          if [ "${RELEASE_RESULT}" = "success" ]; then
             SUBJECT="${RELEASE_SUBJECT}"
             IMAGE_BASE="${RELEASE_IMAGE_BASE}"
             DIGEST="${RELEASE_DIGEST}"
             REF_NAME="${RELEASE_REF_NAME}"
             TITLE="${RELEASE_TITLE}"
             BUILD_TYPE="release"
-          elif [ "${{ needs.ref-build.result }}" = "success" ]; then
+          elif [ "${REF_RESULT}" = "success" ]; then
             SUBJECT="${REF_SUBJECT}"
             IMAGE_BASE="${REF_IMAGE_BASE}"
             DIGEST="${REF_DIGEST}"
+            REF_NAME="${REF_NAME}"
             TITLE="${REF_TITLE}"
             BUILD_TYPE="ref"
           else
@@ -643,12 +773,22 @@ jobs:
 
           if [ -z "${SUBJECT}" ] ||
              [ -z "${IMAGE_BASE}" ] ||
-             [ -z "${DIGEST}" ]; then
+             [ -z "${DIGEST}" ] ||
+             [ -z "${REF_NAME}" ]; then
             echo "::error::The successful build did not provide all required SLSA inputs."
             echo "::error::Subject: ${SUBJECT:-<empty>}"
             echo "::error::Image base: ${IMAGE_BASE:-<empty>}"
             echo "::error::Digest: ${DIGEST:-<empty>}"
+            echo "::error::Ref name: ${REF_NAME:-<empty>}"
             exit 1
+          fi
+
+          if [ -z "${TITLE}" ]; then
+            if [ "${BUILD_TYPE}" = "release" ]; then
+              TITLE="SLSA verification (release build)"
+            else
+              TITLE="SLSA verification (merge/ref build)"
+            fi
           fi
 
           {
@@ -659,6 +799,18 @@ jobs:
             echo "title=${TITLE}"
             echo "build_type=${BUILD_TYPE}"
           } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## 🛡️ SLSA report inputs"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Build type | \`${BUILD_TYPE}\` |"
+            echo "| Ref | \`${REF_NAME}\` |"
+            echo "| Image | \`${IMAGE_BASE}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+            echo "| Subject | \`${SUBJECT}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Login to GHCR
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
@@ -679,67 +831,102 @@ jobs:
           title: ${{ steps.report_vars.outputs.title }}
           fail-on-unverified: "true"
 
-      - name: Summarize SLSA report
+      - name: Summarize verification result
         shell: bash
         env:
           BUILD_TYPE: ${{ steps.report_vars.outputs.build_type }}
+          REF_NAME: ${{ steps.report_vars.outputs.ref_name }}
           SUBJECT: ${{ steps.report_vars.outputs.subject }}
           VERIFIED: ${{ steps.report.outputs.verified }}
           REPORT: ${{ steps.report.outputs.summary_markdown }}
         run: |
+          set -euo pipefail
+
+          REPOSITORY_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          WORKFLOW_RUN_URL="${REPOSITORY_URL}/actions/runs/${GITHUB_RUN_ID}"
+
           {
-            echo "## 🛡️ SLSA verification";
-            echo "";
-            echo "- Build type: ${BUILD_TYPE}";
-            echo "- Subject: \`${SUBJECT}\`";
-            echo "- Verified: ${VERIFIED}";
-            echo "";
-            echo "${REPORT}";
+            echo ""
+            echo "## SLSA verification result"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Build type | \`${BUILD_TYPE}\` |"
+            echo "| Ref | \`${REF_NAME}\` |"
+            echo "| Verified | \`${VERIFIED}\` |"
+            echo "| Subject | \`${SUBJECT}\` |"
+            echo "| Workflow run | [View workflow run](${WORKFLOW_RUN_URL}) |"
+            echo ""
+            printf '%s\n' "${REPORT}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment merged PR with SLSA report
         if: |
           steps.report_vars.outputs.build_type == 'ref' &&
-          needs.ref-build.outputs.comment_enabled == 'true'
+          needs['ref-build'].outputs.comment_enabled == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           IMAGE: ${{ steps.report_vars.outputs.image_base }}
           DIGEST: ${{ steps.report_vars.outputs.digest }}
+          SUBJECT: ${{ steps.report_vars.outputs.subject }}
           REF_NAME: ${{ steps.report_vars.outputs.ref_name }}
-          PR_NUMBER: ${{ needs.ref-build.outputs.pr_number }}
-          IMAGE_TAG: ${{ needs.ref-build.outputs.image_tag }}
+          PR_NUMBER: ${{ needs['ref-build'].outputs.pr_number }}
+          IMAGE_TAG: ${{ needs['ref-build'].outputs.image_tag }}
+          VERIFIED: ${{ steps.report.outputs.verified }}
           SLSA_REPORT: ${{ steps.report.outputs.summary_markdown }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const issue_number = Number(process.env.PR_NUMBER);
+            const issueNumber = Number(process.env.PR_NUMBER);
             const marker = '<!-- docker-meta -->';
+
+            if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+              core.setFailed(
+                `Invalid pull request number: ${process.env.PR_NUMBER}`
+              );
+              return;
+            }
+
+            const repositoryUrl =
+              `${context.serverUrl}/${owner}/${repo}`;
+            const packageUrl =
+              `${repositoryUrl}/pkgs/container/${encodeURIComponent(repo)}`;
+            const workflowRunUrl =
+              `${repositoryUrl}/actions/runs/${context.runId}`;
 
             const body = `${marker}
             ## Docker image metadata (merge)
 
-            - Ref: ${process.env.REF_NAME}
-            - Image: ${process.env.IMAGE}
-            - Digest: ${process.env.DIGEST}
+            | Property | Value |
+            |---|---|
+            | Ref | \`${process.env.REF_NAME}\` |
+            | Container package | [\`${process.env.IMAGE}\`](${packageUrl}) |
+            | Digest | \`${process.env.DIGEST}\` |
+            | Subject | \`${process.env.SUBJECT}\` |
+            | SLSA verified | ${process.env.VERIFIED === 'true' ? '✅ Yes' : '❌ No'} |
+            | Workflow run | [View verification run](${workflowRunUrl}) |
 
-            <details><summary>Tags</summary>
+            <details>
+            <summary>Tags</summary>
 
-            \`\`\`
+            \`\`\`text
             ${process.env.IMAGE_TAG}
             \`\`\`
 
             </details>
 
-            ${process.env.SLSA_REPORT}
+            ${process.env.SLSA_REPORT || ''}
             `;
 
-            const { data: comments } =
-              await github.rest.issues.listComments({
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
                 owner,
                 repo,
-                issue_number,
+                issue_number: issueNumber,
                 per_page: 100
-              });
+              }
+            );
 
             const previous = comments.find(comment =>
               comment.user?.type === 'Bot' &&
@@ -753,19 +940,31 @@ jobs:
                 comment_id: previous.id,
                 body
               });
+
+              core.notice(
+                `Updated SLSA report on pull request #${issueNumber}.`
+              );
             } else {
               await github.rest.issues.createComment({
                 owner,
                 repo,
-                issue_number,
+                issue_number: issueNumber,
                 body
               });
+
+              core.notice(
+                `Added SLSA report to pull request #${issueNumber}.`
+              );
             }
 
-      - name: Add SLSA report to GitHub release
-        if: steps.report_vars.outputs.build_type == 'release'
+      - name: Add SLSA report and publish GitHub release
+        if: |
+          steps.report_vars.outputs.build_type == 'release' &&
+          steps.report.outputs.verified == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
+          RELEASE_ID: ${{ needs['prepare-release'].outputs.release_id }}
+          RELEASE_URL: ${{ needs['prepare-release'].outputs.release_url }}
           TAG_NAME: ${{ steps.report_vars.outputs.ref_name }}
           IMAGE: ${{ steps.report_vars.outputs.image_base }}
           DIGEST: ${{ steps.report_vars.outputs.digest }}
@@ -775,58 +974,69 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
+            const releaseId = Number(process.env.RELEASE_ID);
             const tag = process.env.TAG_NAME;
+
+            if (!Number.isInteger(releaseId) || releaseId <= 0) {
+              core.setFailed(
+                `Invalid GitHub Release ID: ${process.env.RELEASE_ID}`
+              );
+              return;
+            }
+
+            const repositoryUrl =
+              `${context.serverUrl}/${owner}/${repo}`;
+            const tagUrl =
+              `${repositoryUrl}/releases/tag/${encodeURIComponent(tag)}`;
+            const packageUrl =
+              `${repositoryUrl}/pkgs/container/${encodeURIComponent(repo)}`;
+            const workflowRunUrl =
+              `${repositoryUrl}/actions/runs/${context.runId}`;
+
             const markerStart = '<!-- slsa-report:start -->';
             const markerEnd = '<!-- slsa-report:end -->';
 
-            let release;
+            const response = await github.rest.repos.getRelease({
+              owner,
+              repo,
+              release_id: releaseId
+            });
 
-            try {
-              const response = await github.rest.repos.getReleaseByTag({
-                owner,
-                repo,
-                tag
-              });
+            const release = response.data;
 
-              release = response.data;
-            } catch (error) {
-              if (error.status === 404) {
-                core.warning(
-                  `No GitHub release is associated with tag ${tag}. ` +
-                  'The SLSA report was generated but was not added to a release.'
-                );
-                return;
-              }
-
-              throw error;
+            if (release.tag_name !== tag) {
+              core.setFailed(
+                `Prepared release tag ${release.tag_name} does not match ` +
+                `the verified tag ${tag}.`
+              );
+              return;
             }
 
             const slsaSection = `${markerStart}
             ## 🛡️ SLSA verification
 
-            - **Tag:** \`${tag}\`
-            - **Image:** \`${process.env.IMAGE}\`
-            - **Digest:** \`${process.env.DIGEST}\`
-            - **Subject:** \`${process.env.SUBJECT}\`
-            - **Verified:** ${process.env.VERIFIED}
+            | Property | Value |
+            |---|---|
+            | Status | ✅ Verified |
+            | Tag | [\`${tag}\`](${tagUrl}) |
+            | Container package | [\`${process.env.IMAGE}\`](${packageUrl}) |
+            | Digest | \`${process.env.DIGEST}\` |
+            | Subject | \`${process.env.SUBJECT}\` |
+            | Workflow run | [View verification run](${workflowRunUrl}) |
 
             ${process.env.SLSA_REPORT || ''}
 
             ${markerEnd}`;
 
-            const currentBody = release.body || '';
-            const escapedStart = markerStart.replace(
-              /[.*+?^${}()|[\]\\]/g,
-              '\\$&'
-            );
-            const escapedEnd = markerEnd.replace(
-              /[.*+?^${}()|[\]\\]/g,
-              '\\$&'
-            );
+            const escapeRegex = value =>
+              value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
             const existingSection = new RegExp(
-              `${escapedStart}[\\s\\S]*?${escapedEnd}`,
+              `${escapeRegex(markerStart)}[\\s\\S]*?${escapeRegex(markerEnd)}`,
               'm'
             );
+
+            const currentBody = release.body || '';
 
             const body = existingSection.test(currentBody)
               ? currentBody.replace(existingSection, slsaSection)
@@ -837,11 +1047,12 @@ jobs:
             await github.rest.repos.updateRelease({
               owner,
               repo,
-              release_id: release.id,
-              body
+              release_id: releaseId,
+              body,
+              draft: false
             });
 
             core.notice(
-              `Added the SLSA report to release ${release.name || tag}.`
+              `Published verified release ${tag}: ` +
+              `${process.env.RELEASE_URL || tagUrl}`
             );
-
