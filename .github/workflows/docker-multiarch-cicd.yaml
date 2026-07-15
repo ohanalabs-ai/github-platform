@@ -579,8 +579,8 @@ jobs:
           SRC="${GHCR_IMAGE}@${DIGEST}"
           docker buildx imagetools create -t "docker.io/${DOCKERHUB_REPO}:${TAG}" -t "docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}" "${SRC}"
 
-  prepare-release:
-    name: 📝 prepare GitHub release
+  github-release:
+    name: 📝 github-release
     needs:
       - release-build
     if: ${{ needs.release-build.result == 'success' }}
@@ -701,11 +701,11 @@ jobs:
 
 
   slsa-report:
-    name: 🛡️ SLSA report
+    name: 🛡️ slsa
     needs:
       - ref-build
       - release-build
-      - prepare-release
+      - github-release
 
     # For a ref event, release-build and prepare-release are skipped.
     # For a tag event, ref-build is skipped.
@@ -717,7 +717,7 @@ jobs:
         needs['ref-build'].result == 'success' ||
         (
           needs['release-build'].result == 'success' &&
-          needs['prepare-release'].result == 'success'
+          needs['github-release'].result == 'success'
         )
       )
 
