@@ -63,7 +63,7 @@ on:
         description: Reusable workflow identity used to verify artifact attestations with gh attestation verify.
         required: false
         type: string
-        default: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+        default: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml
 
 # Set of permissions needed by the workflow
 permissions:
