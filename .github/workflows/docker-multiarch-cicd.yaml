@@ -382,9 +382,12 @@ jobs:
       effective_ref: ${{ steps.build_vars.outputs.effective_ref }}
       effective_sha: ${{ steps.build_vars.outputs.effective_sha }}
       short_sha: ${{ steps.build_vars.outputs.short_sha }}
-      image_base: ${{ steps.build_vars.outputs.image_base }}
+      image_base: ${{ steps.ref_build.outputs.image-base }}
       image_tag: ${{ steps.build_vars.outputs.image_tag }}
       image_description: ${{ steps.build_vars.outputs.image_description }}
+      image_digest: ${{ steps.ref_build.outputs.digest }}
+      image_subject: ${{ steps.ref_build.outputs.subject }}
+      report_title: SLSA verification (merge/ref build)
       pr_number: ${{ steps.build_vars.outputs.pr_number }}
       comment_enabled: ${{ steps.build_vars.outputs.comment_enabled }}
     steps:
@@ -458,17 +461,6 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-ref.spdx.json
 
-      - name: Verify SLSA provenance by ref
-        id: slsa_ref
-        uses: vionix-proj/actions/docker/slsa-report@main
-        with:
-          subject: ${{ steps.ref_build.outputs.subject }}
-          image-base: ${{ steps.ref_build.outputs.image-base }}
-          digest: ${{ steps.ref_build.outputs.digest }}
-          signer-workflow: ${{ inputs.slsa-signer-workflow }}
-          ref-name: ${{ steps.build_vars.outputs.effective_ref }}
-          title: SLSA verification (merge/ref build)
-
       - name: Comment PR with build metadata
         if: ${{ steps.build_vars.outputs.comment_enabled == 'true' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
@@ -479,7 +471,6 @@ jobs:
             ${{ steps.build_vars.outputs.image_tag }}
           PR_NUMBER: ${{ steps.build_vars.outputs.pr_number }}
           REF_NAME: ${{ steps.build_vars.outputs.effective_ref }}
-          SLSA_REPORT: ${{ steps.slsa_ref.outputs.summary_markdown }}
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -495,8 +486,6 @@ jobs:
             ${process.env.TAGS}
             \`\`\`
             </details>
-
-            ${process.env.SLSA_REPORT}
             `;
             const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
             const previous = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
@@ -511,6 +500,14 @@ jobs:
     timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ${{ inputs.github-actions-runner }}
+    outputs:
+      effective_ref: ${{ steps.vars.outputs.tag }}
+      effective_sha: ${{ steps.vars.outputs.sha }}
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+      image_base: ${{ steps.release_ref_build.outputs.image-base }}
+      image_digest: ${{ steps.release_ref_build.outputs.digest }}
+      image_subject: ${{ steps.release_ref_build.outputs.subject }}
+      report_title: SLSA verification (release build)
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -542,17 +539,6 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-tag.spdx.json
           push-latest: true
-
-      - name: Verify SLSA provenance for release
-        id: slsa_release
-        uses: vionix-proj/actions/docker/slsa-report@main
-        with:
-          subject: ${{ steps.release_ref_build.outputs.subject }}
-          image-base: ${{ steps.release_ref_build.outputs.image-base }}
-          digest: ${{ steps.release_ref_build.outputs.digest }}
-          signer-workflow: ${{ inputs.slsa-signer-workflow }}
-          ref-name: ${{ steps.vars.outputs.tag }}
-          title: SLSA verification (release build)
 
       - name: Docker Hub creds (optional)
         id: dh_creds
@@ -591,4 +577,180 @@ jobs:
         run: |
           set -euo pipefail
           SRC="${GHCR_IMAGE}@${DIGEST}"
-          docker buildx imagetools create             -t "docker.io/${DOCKERHUB_REPO}:${TAG}"             -t "docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}"             "${SRC}"
+          docker buildx imagetools create -t "docker.io/${DOCKERHUB_REPO}:${TAG}" -t "docker.io/${DOCKERHUB_REPO}:${TAG}-${SHORT_SHA}" "${SRC}"
+
+  slsa-report:
+    name: 🛡️ SLSA report
+    timeout-minutes: 5
+    needs:
+      - ref-build
+      - release-build
+
+    # One of the build jobs will always be skipped. Without always(), this job
+    # would also be skipped because of the skipped dependency.
+    if: |
+      always() &&
+      (
+        needs.ref-build.result == 'success' ||
+        needs.release-build.result == 'success'
+      )
+
+    runs-on: ${{ inputs.github-actions-runner }}
+
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+      artifact-metadata: read
+      pull-requests: write
+
+    steps:
+      - name: Resolve SLSA report inputs
+        id: report_vars
+        shell: bash
+        env:
+          REF_SUBJECT: ${{ needs.ref-build.outputs.image_subject }}
+          REF_IMAGE_BASE: ${{ needs.ref-build.outputs.image_base }}
+          REF_DIGEST: ${{ needs.ref-build.outputs.image_digest }}
+          REF_NAME: ${{ needs.ref-build.outputs.effective_ref }}
+          REF_TITLE: ${{ needs.ref-build.outputs.report_title }}
+
+          RELEASE_SUBJECT: ${{ needs.release-build.outputs.image_subject }}
+          RELEASE_IMAGE_BASE: ${{ needs.release-build.outputs.image_base }}
+          RELEASE_DIGEST: ${{ needs.release-build.outputs.image_digest }}
+          RELEASE_REF_NAME: ${{ needs.release-build.outputs.effective_ref }}
+          RELEASE_TITLE: ${{ needs.release-build.outputs.report_title }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ needs.release-build.result }}" = "success" ]; then
+            SUBJECT="${RELEASE_SUBJECT}"
+            IMAGE_BASE="${RELEASE_IMAGE_BASE}"
+            DIGEST="${RELEASE_DIGEST}"
+            REF_NAME="${RELEASE_REF_NAME}"
+            TITLE="${RELEASE_TITLE}"
+            BUILD_TYPE="release"
+          elif [ "${{ needs.ref-build.result }}" = "success" ]; then
+            SUBJECT="${REF_SUBJECT}"
+            IMAGE_BASE="${REF_IMAGE_BASE}"
+            DIGEST="${REF_DIGEST}"
+            TITLE="${REF_TITLE}"
+            BUILD_TYPE="ref"
+          else
+            echo "::error::No successful build is available for SLSA verification."
+            exit 1
+          fi
+
+          if [ -z "${SUBJECT}" ] ||
+             [ -z "${IMAGE_BASE}" ] ||
+             [ -z "${DIGEST}" ]; then
+            echo "::error::The successful build did not provide all required SLSA inputs."
+            echo "::error::Subject: ${SUBJECT:-<empty>}"
+            echo "::error::Image base: ${IMAGE_BASE:-<empty>}"
+            echo "::error::Digest: ${DIGEST:-<empty>}"
+            exit 1
+          fi
+
+          {
+            echo "subject=${SUBJECT}"
+            echo "image_base=${IMAGE_BASE}"
+            echo "digest=${DIGEST}"
+            echo "ref_name=${REF_NAME}"
+            echo "title=${TITLE}"
+            echo "build_type=${BUILD_TYPE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify SLSA provenance
+        id: report
+        uses: vionix-proj/actions/docker/slsa-report@main
+        with:
+          subject: ${{ steps.report_vars.outputs.subject }}
+          image-base: ${{ steps.report_vars.outputs.image_base }}
+          digest: ${{ steps.report_vars.outputs.digest }}
+          signer-workflow: ${{ inputs.slsa-signer-workflow }}
+          ref-name: ${{ steps.report_vars.outputs.ref_name }}
+          title: ${{ steps.report_vars.outputs.title }}
+          fail-on-unverified: "true"
+
+      - name: Summarize SLSA report
+        shell: bash
+        env:
+          BUILD_TYPE: ${{ steps.report_vars.outputs.build_type }}
+          SUBJECT: ${{ steps.report_vars.outputs.subject }}
+          VERIFIED: ${{ steps.report.outputs.verified }}
+          REPORT: ${{ steps.report.outputs.summary_markdown }}
+        run: |
+          {
+            echo "## 🛡️ SLSA verification";
+            echo "";
+            echo "- Build type: ${BUILD_TYPE}";
+            echo "- Subject: \`${SUBJECT}\`";
+            echo "- Verified: ${VERIFIED}";
+            echo "";
+            echo "${REPORT}";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment merged PR with SLSA report
+        if: |
+          steps.report_vars.outputs.build_type == 'ref' &&
+          needs.ref-build.outputs.comment_enabled == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          IMAGE: ${{ steps.report_vars.outputs.image_base }}
+          DIGEST: ${{ steps.report_vars.outputs.digest }}
+          REF_NAME: ${{ steps.report_vars.outputs.ref_name }}
+          PR_NUMBER: ${{ needs.ref-build.outputs.pr_number }}
+          IMAGE_TAG: ${{ needs.ref-build.outputs.image_tag }}
+          SLSA_REPORT: ${{ steps.report.outputs.summary_markdown }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const marker = '<!-- docker-meta -->';
+
+            const body = `${marker}
+            ## Docker image metadata (merge)
+
+            - Ref: ${process.env.REF_NAME}
+            - Image: ${process.env.IMAGE}
+            - Digest: ${process.env.DIGEST}
+
+            <details><summary>Tags</summary>
+
+            \`\`\`
+            ${process.env.IMAGE_TAG}
+            \`\`\`
+
+            </details>
+
+            ${process.env.SLSA_REPORT}
+            `;
+
+            const { data: comments } =
+              await github.rest.issues.listComments({
+                owner,
+                repo,
+                issue_number,
+                per_page: 100
+              });
+
+            const previous = comments.find(comment =>
+              comment.user?.type === 'Bot' &&
+              comment.body?.includes(marker)
+            );
+
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: previous.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
