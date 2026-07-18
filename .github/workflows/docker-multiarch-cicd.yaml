@@ -36,6 +36,18 @@ on:
         description: Bake target service name ... Not needed if docker-compose.yaml has a single service
         required: false
         type: string
+      image-name-suffix:
+        description: >-
+          Optional path suffix appended to the image base for monorepos that
+          publish MULTIPLE images from ONE repo (e.g. "api" ->
+          ghcr.io/<owner>/<repo>/api). Empty (default) preserves the legacy
+          one-image-per-repo name, so existing single-image callers are
+          unaffected. On Docker Hub (tag builds) the suffix is joined with a
+          dash (<owner>/<repo>-<suffix>) because Docker Hub allows only a single
+          path segment.
+        required: false
+        type: string
+        default: ""
       dockerhub-registry:
         description: Optional Docker Hub registry hostname for release mirroring.
         required: false
@@ -135,7 +147,11 @@ jobs:
           echo "pr=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           echo "full_sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
-          echo "ghcr_image_base=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          # Optional monorepo suffix: ghcr.io/<owner>/<repo>[/<suffix>]
+          SUFFIX="$(echo '${{ inputs.image-name-suffix }}' | tr '[:upper:]' '[:lower:]' | sed 's#^/*##; s#/*$##')"
+          BASE="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          if [ -n "$SUFFIX" ]; then BASE="${BASE}/${SUFFIX}"; fi
+          echo "ghcr_image_base=${BASE}" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
@@ -425,7 +441,10 @@ jobs:
           fi
 
           SHORT_SHA="${EFFECTIVE_SHA::7}"
+          # Optional monorepo suffix: ghcr.io/<owner>/<repo>[/<suffix>]
+          SUFFIX="$(echo '${{ inputs.image-name-suffix }}' | tr '[:upper:]' '[:lower:]' | sed 's#^/*##; s#/*$##')"
           IMAGE_BASE="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          if [ -n "$SUFFIX" ]; then IMAGE_BASE="${IMAGE_BASE}/${SUFFIX}"; fi
           IMAGE_TAG="${IMAGE_BASE}:${EFFECTIVE_REF}-${SHORT_SHA}"
 
           echo "effective_ref=${EFFECTIVE_REF}" >> "$GITHUB_OUTPUT"
@@ -527,8 +546,14 @@ jobs:
           echo "sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
           echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          echo "ghcr_image_base=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-          echo "dockerhub_repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          # Optional monorepo suffix. GHCR: .../<repo>/<suffix>. Docker Hub allows
+          # only one path segment, so join with a dash: <owner>/<repo>-<suffix>.
+          SUFFIX="$(echo '${{ inputs.image-name-suffix }}' | tr '[:upper:]' '[:lower:]' | sed 's#^/*##; s#/*$##')"
+          BASE="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          DH_REPO="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          if [ -n "$SUFFIX" ]; then BASE="${BASE}/${SUFFIX}"; DH_REPO="${DH_REPO}-${SUFFIX//\//-}"; fi
+          echo "ghcr_image_base=${BASE}" >> $GITHUB_OUTPUT
+          echo "dockerhub_repo=${DH_REPO}" >> $GITHUB_OUTPUT
 
       - name: Build and attest for release tag
         id: release_ref_build
