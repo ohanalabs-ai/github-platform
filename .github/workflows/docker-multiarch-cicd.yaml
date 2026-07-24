@@ -445,7 +445,11 @@ jobs:
           SUFFIX="$(echo '${{ inputs.image-name-suffix }}' | tr '[:upper:]' '[:lower:]' | sed 's#^/*##; s#/*$##')"
           IMAGE_BASE="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           if [ -n "$SUFFIX" ]; then IMAGE_BASE="${IMAGE_BASE}/${SUFFIX}"; fi
-          IMAGE_TAG="${IMAGE_BASE}:${EFFECTIVE_REF}-${SHORT_SHA}"
+          # Docker tags allow only [A-Za-z0-9._-] (max 128 chars). Branch refs may contain
+          # '/' (e.g. vionix/base-0.9.11), which is illegal in a tag, so slugify any invalid
+          # character to '-' -> vionix-base-0.9.11. effective_ref (below) keeps the real ref.
+          REF_SLUG="$(printf '%s' "${EFFECTIVE_REF}" | sed 's#[^A-Za-z0-9._-]#-#g')"
+          IMAGE_TAG="${IMAGE_BASE}:${REF_SLUG}-${SHORT_SHA}"
 
           echo "effective_ref=${EFFECTIVE_REF}" >> "$GITHUB_OUTPUT"
           echo "effective_sha=${EFFECTIVE_SHA}" >> "$GITHUB_OUTPUT"
