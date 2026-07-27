@@ -241,6 +241,7 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance (PR)
+        if: env.PUSH_ATTESTATIONS == 'true'
         uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
         with:
           subject-name: ${{ steps.pr_digest.outputs.image_base }}
@@ -249,6 +250,7 @@ jobs:
           show-summary: true
 
       - name: Generate SBOM (PR)
+        if: env.PUSH_ATTESTATIONS == 'true'
         id: sbom_pr
         uses: anchore/sbom-action@v0.17.3
         with:
@@ -256,6 +258,7 @@ jobs:
           output-file: sbom-pr.spdx.json
 
       - name: Attest SBOM (PR)
+        if: env.PUSH_ATTESTATIONS == 'true'
         uses: actions/attest-sbom@5026d3663739160db546203eeaffa6aa1c51a4d6 # v1.4.1
         with:
           subject-name: ${{ steps.pr_digest.outputs.image_base }}
