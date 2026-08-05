@@ -85,6 +85,21 @@ on:
         type: string
         default: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml
 
+
+    outputs:
+      image_tag:
+        description: Full image reference produced by ref-build (e.g. ghcr.io/org/repo/suffix:main-abc1234). Empty when ref-build was skipped.
+        value: ${{ jobs.ref-build.outputs.image_tag }}
+      image_base:
+        description: Image base without tag (e.g. ghcr.io/org/repo/suffix). Empty when ref-build was skipped.
+        value: ${{ jobs.ref-build.outputs.image_base }}
+      short_sha:
+        description: 7-character SHA used in the tag. Empty when ref-build was skipped.
+        value: ${{ jobs.ref-build.outputs.short_sha }}
+      effective_ref:
+        description: Git ref name (branch or tag) used for the build. Empty when ref-build was skipped.
+        value: ${{ jobs.ref-build.outputs.effective_ref }}
+
 # Set of permissions needed by the workflow
 permissions:
   contents: write
