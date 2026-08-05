@@ -896,7 +896,7 @@ jobs:
           slsa-build-level: ${{ inputs.slsa-build-level }}
           ref-name: ${{ steps.report_vars.outputs.ref_name }}
           title: ${{ steps.report_vars.outputs.title }}
-          fail-on-unverified: "true"
+          fail-on-unverified: ${{ env.PUSH_ATTESTATIONS }}
 
       - name: Summarize verification result
         shell: bash
