@@ -1,0 +1,148 @@
+# Reusable workflow — pin a freshly-built Docker image tag into a file on main.
+#
+# Reads the canonical image name from the docker-compose.yaml at docker-compose-context/
+# (the single `image:` field in the services block), combines it with the tag from the
+# build job output, updates pin-file via yq, and commits + pushes.
+#
+# Usage example (validate image):
+#   deploy-tag:
+#     needs: docker-multiarch
+#     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+#     uses: vionix-proj/github-platform/.github/workflows/docker-deploy-tag.yaml@main
+#     with:
+#       image-tag:             ${{ needs.docker-multiarch.outputs.image_tag }}
+#       docker-compose-context: scripts/validate
+#       pin-file:              .github/workflows/validate.yml
+#       pin-yq-expr:           .env.VALIDATE_IMAGE
+#       commit-message-prefix: "chore(validate)"
+#     permissions:
+#       contents: write
+#
+# Usage example (registry.yaml analyzer entry):
+#   deploy-tag:
+#     needs: docker-multiarch
+#     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+#     uses: vionix-proj/github-platform/.github/workflows/docker-deploy-tag.yaml@main
+#     with:
+#       image-tag:             ${{ needs.docker-multiarch.outputs.image_tag }}
+#       docker-compose-context: languages/go/ecosystems/gomod-default
+#       pin-file:              registry.yaml
+#       pin-yq-expr:           .analyzers[] | select(.id == "golang-gomod-default") | .image
+#       commit-message-prefix: "chore(registry)"
+#     permissions:
+#       contents: write
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: >-
+          Full image reference produced by the build job
+          (e.g. needs.docker-multiarch.outputs.image_tag →
+          ghcr.io/org/repo/suffix:main-abc1234).
+          The tag suffix (after the last ':') is preserved and combined with
+          the image base read from docker-compose.yaml.
+        required: true
+        type: string
+      docker-compose-context:
+        description: >-
+          Path to the directory containing docker-compose.yaml.
+          The single `image:` field in the services block is the canonical
+          image base name (e.g. scripts/validate or
+          languages/go/ecosystems/gomod-default).
+        required: true
+        type: string
+      pin-file:
+        description: >-
+          Repo-relative path of the file to update with the pinned image
+          reference (e.g. .github/workflows/validate.yml or registry.yaml).
+        required: true
+        type: string
+      pin-yq-expr:
+        description: >-
+          yq v4 LHS selector for the field to update inside pin-file.
+          Parentheses are added automatically. Examples:
+            .env.VALIDATE_IMAGE
+            .analyzers[] | select(.id == "golang-gomod-default") | .image
+        required: true
+        type: string
+      commit-message-prefix:
+        description: >-
+          Conventional-commit prefix for the update commit message.
+          Defaults to "chore(deploy)".
+        required: false
+        type: string
+        default: "chore(deploy)"
+
+jobs:
+  deploy-tag:
+    name: Pin image tag into ${{ inputs.pin-file }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Parse image base from docker-compose.yaml
+        id: image-ref
+        env:
+          COMPOSE_CONTEXT: ${{ inputs.docker-compose-context }}
+        run: |
+          set -euo pipefail
+          COMPOSE_FILE="${COMPOSE_CONTEXT}/docker-compose.yaml"
+          if [ ! -f "${COMPOSE_FILE}" ]; then
+            echo "::error::docker-compose.yaml not found at ${COMPOSE_FILE}"
+            exit 1
+          fi
+          # Each service block has exactly one `image:` field — read it.
+          IMAGE_BASE="$(yq e '.services.*.image | select(. != null)' "${COMPOSE_FILE}" | head -1)"
+          if [ -z "${IMAGE_BASE}" ]; then
+            echo "::error::No 'image:' field found in ${COMPOSE_FILE}"
+            exit 1
+          fi
+          echo "image-base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
+          echo "Parsed image base: ${IMAGE_BASE}"
+
+      - name: Resolve pinned image reference
+        id: tag
+        env:
+          IMAGE_TAG:  ${{ inputs.image-tag }}
+          IMAGE_BASE: ${{ steps.image-ref.outputs.image-base }}
+        run: |
+          set -euo pipefail
+          if [ -n "${IMAGE_TAG}" ]; then
+            # Extract the tag suffix (main-abc1234) from the full reference
+            TAG="${IMAGE_TAG##*:}"
+            echo "image=${IMAGE_BASE}:${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # Fallback when ref-build was skipped (should not happen on main push)
+            SHORT_SHA="${GITHUB_SHA::7}"
+            echo "image=${IMAGE_BASE}:main-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Pinning image: ${{ steps.image-ref.outputs.image-base }}:${IMAGE_TAG##*:}"
+
+      - name: Update ${{ inputs.pin-file }} with pinned image
+        env:
+          IMAGE:        ${{ steps.tag.outputs.image }}
+          PIN_FILE:     ${{ inputs.pin-file }}
+          PIN_YQ_EXPR:  ${{ inputs.pin-yq-expr }}
+        run: |
+          set -euo pipefail
+          yq e "(${PIN_YQ_EXPR}) = strenv(IMAGE)" -i "${PIN_FILE}"
+
+      - name: Commit and push
+        env:
+          IMAGE:      ${{ steps.tag.outputs.image }}
+          PIN_FILE:   ${{ inputs.pin-file }}
+          MSG_PREFIX: ${{ inputs.commit-message-prefix }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${PIN_FILE}"
+          git diff --cached --quiet && echo "No change, nothing to commit." && exit 0
+          git commit -m "${MSG_PREFIX}: pin image to ${IMAGE}"
+          git push
