@@ -105,8 +105,8 @@ env:
   DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub-namespace || github.repository_owner }}
 
   # Set to true only if your org/repo has artifact-metadata enabled and you want attestations pushed to the registry
-  # The artifact-metadata APIs (used when pushing attestations to the registry) are only available if your org/account has the Artifact Attestations feature enabled. For personal orgs it’s generally not on by default, and there’s no self-serve toggle. If you don’t have it enabled, GitHub returns 404 and you’ll see the storage-record warning.
-  # What to do: Keep PUSH_ATTESTATIONS: "false" (as in the current workflow). You’ll still build, push images, and generate SBOMs; you just won’t push attestations to GHCR.
+  # The artifact-metadata APIs (used when pushing attestations to the registry) are only available if your org/account has the Artifact Attestations feature enabled. For personal orgs it's generally not on by default, and there's no self-serve toggle. If you don't have it enabled, GitHub returns 404 and you'll see the storage-record warning.
+  # What to do: Keep PUSH_ATTESTATIONS: "false" (as in the current workflow). You'll still build, push images, and generate SBOMs; you just won't push attestations to GHCR.
   # If/when you get the feature enabled (GitHub Enterprise Cloud / allowlisted), set PUSH_ATTESTATIONS: "true" to start pushing attestations. No other changes needed.
   PUSH_ATTESTATIONS: ${{ inputs.push-attestations || 'false' }}
 
@@ -170,7 +170,6 @@ jobs:
       # Force docker/bake-action to use ONLY GHCR by rewriting compose image references to ghcr.io/owner/repo
       - name: Rewrite compose images to GHCR only
         shell: bash
-        working-directory: ${{ inputs.docker-compose-context }}
         env:
           GHCR_IMAGE_BASE: ${{ steps.vars.outputs.ghcr_image_base }}
           FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
@@ -216,6 +215,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           set: |
             ${{ steps.compose-metadata.outputs.target-service }}.platform=${{ env.PLATFORMS }}
+            ${{ steps.compose-metadata.outputs.target-service }}.context=${{ inputs.docker-compose-context }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.full_sha }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.short_sha }}
             ${{ steps.compose-metadata.outputs.target-service }}.cache-from=type=gha,scope=${{ steps.compose-metadata.outputs.target-service }}
