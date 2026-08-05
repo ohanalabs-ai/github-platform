@@ -298,15 +298,21 @@ jobs:
             ${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.short_sha }}
           LABELS: ${{ steps.meta.outputs.labels }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          IMAGE_SUFFIX: ${{ inputs.image-name-suffix }}
         with:
           script: |
             const {owner, repo} = context.repo;
             const issue_number = Number(process.env.PR_NUMBER);
-            const marker = '<!-- docker-meta -->';
+            const suffix = process.env.IMAGE_SUFFIX;
+            const marker = suffix ? `<!-- docker-meta: ${suffix} -->` : '<!-- docker-meta -->';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const body = `${marker}
             ## Docker image metadata
-            - Image: ${process.env.IMAGE}
-            - Digest: ${process.env.DIGEST}
+            | Property | Value |
+            |---|---|
+            | Image | \`${process.env.IMAGE}\` |
+            | Digest | \`${process.env.DIGEST}\` |
+            | CI/CD run | [View run](${runUrl}) |
             <details><summary>Tags</summary>
             \`\`\`
             ${process.env.TAGS}
@@ -505,16 +511,22 @@ jobs:
             ${{ steps.build_vars.outputs.image_tag }}
           PR_NUMBER: ${{ steps.build_vars.outputs.pr_number }}
           REF_NAME: ${{ steps.build_vars.outputs.effective_ref }}
+          IMAGE_SUFFIX: ${{ inputs.image-name-suffix }}
         with:
           script: |
             const {owner, repo} = context.repo;
             const issue_number = Number(process.env.PR_NUMBER);
-            const marker = '<!-- docker-meta -->';
+            const suffix = process.env.IMAGE_SUFFIX;
+            const marker = suffix ? `<!-- docker-meta: ${suffix} -->` : '<!-- docker-meta -->';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const body = `${marker}
             ## Docker image metadata (merge)
-            - Ref: ${process.env.REF_NAME}
-            - Image: ${process.env.IMAGE}
-            - Digest: ${process.env.DIGEST}
+            | Property | Value |
+            |---|---|
+            | Ref | \`${process.env.REF_NAME}\` |
+            | Image | \`${process.env.IMAGE}\` |
+            | Digest | \`${process.env.DIGEST}\` |
+            | CI/CD run | [View run](${runUrl}) |
             <details><summary>Tags</summary>
             \`\`\`
             ${process.env.TAGS}
