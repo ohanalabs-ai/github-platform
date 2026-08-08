@@ -298,26 +298,37 @@ jobs:
             ${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.short_sha }}
           LABELS: ${{ steps.meta.outputs.labels }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          SHORT_SHA: ${{ steps.vars.outputs.short_sha }}
+          IMAGE_SUFFIX: ${{ inputs.image-name-suffix }}
         with:
           script: |
             const {owner, repo} = context.repo;
             const issue_number = Number(process.env.PR_NUMBER);
-            const marker = '<!-- docker-meta -->';
-            const body = `${marker}
-            ## Docker image metadata
-            - Image: ${process.env.IMAGE}
-            - Digest: ${process.env.DIGEST}
-            <details><summary>Tags</summary>
-            \`\`\`
-            ${process.env.TAGS}
-            \`\`\`
-            </details>
-            <details><summary>Labels</summary>
-            \`\`\`
-            ${process.env.LABELS}
-            \`\`\`
-            </details>
-            `;
+            const suffix = process.env.IMAGE_SUFFIX;
+            const marker = `<!-- docker-meta${suffix ? ': ' + suffix : ''} -->`;
+            const image = process.env.IMAGE;
+            const shortSha = process.env.SHORT_SHA;
+            const [, org, pkgPath] = image.match(/ghcr\.io\/([^/]+)\/(.+)/) || [];
+            const encoded = pkgPath ? pkgPath.split('/').map(encodeURIComponent).join('%2F') : '';
+            const packageUrl = org ? `https://github.com/orgs/${org}/packages/container/package/${encoded}` : image;
+            const body = [
+              marker,
+              `## Docker image metadata — \`${image}:${shortSha}\``,
+              '',
+              '| Property | Value |',
+              '|---|---|',
+              `| Image | [${image}](${packageUrl}) |`,
+              `| Digest | \`${process.env.DIGEST}\` |`,
+              '',
+              '**Tags**',
+              '```',
+              process.env.TAGS.trim(),
+              '```',
+              '**Labels**',
+              '```',
+              process.env.LABELS.trim(),
+              '```',
+            ].join('\n');
             const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
             const previous = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
             if (previous) {
@@ -417,6 +428,7 @@ jobs:
       report_title: SLSA verification (merge/ref build)
       pr_number: ${{ steps.build_vars.outputs.pr_number }}
       comment_enabled: ${{ steps.build_vars.outputs.comment_enabled }}
+      image_suffix: ${{ steps.build_vars.outputs.image_suffix }}
     steps:
       - name: Checkout effective branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -457,6 +469,7 @@ jobs:
           echo "effective_ref=${EFFECTIVE_REF}" >> "$GITHUB_OUTPUT"
           echo "effective_sha=${EFFECTIVE_SHA}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_suffix=${SUFFIX}" >> "$GITHUB_OUTPUT"
           echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_description=${IMAGE_DESCRIPTION}" >> "$GITHUB_OUTPUT"
@@ -505,22 +518,33 @@ jobs:
             ${{ steps.build_vars.outputs.image_tag }}
           PR_NUMBER: ${{ steps.build_vars.outputs.pr_number }}
           REF_NAME: ${{ steps.build_vars.outputs.effective_ref }}
+          IMAGE_SUFFIX: ${{ steps.build_vars.outputs.image_suffix }}
         with:
           script: |
             const {owner, repo} = context.repo;
             const issue_number = Number(process.env.PR_NUMBER);
-            const marker = '<!-- docker-meta -->';
-            const body = `${marker}
-            ## Docker image metadata (merge)
-            - Ref: ${process.env.REF_NAME}
-            - Image: ${process.env.IMAGE}
-            - Digest: ${process.env.DIGEST}
-            <details><summary>Tags</summary>
-            \`\`\`
-            ${process.env.TAGS}
-            \`\`\`
-            </details>
-            `;
+            const suffix = process.env.IMAGE_SUFFIX;
+            const marker = `<!-- docker-meta${suffix ? ': ' + suffix : ''} -->`;
+            const image = process.env.IMAGE;
+            const imageTag = process.env.TAGS.trim().split('\n')[0].trim();
+            const [, org, pkgPath] = image.match(/ghcr\.io\/([^/]+)\/(.+)/) || [];
+            const encoded = pkgPath ? pkgPath.split('/').map(encodeURIComponent).join('%2F') : '';
+            const packageUrl = org ? `https://github.com/orgs/${org}/packages/container/package/${encoded}` : image;
+            const body = [
+              marker,
+              `## Docker image metadata — \`${imageTag}\``,
+              '',
+              '| Property | Value |',
+              '|---|---|',
+              `| Ref | \`${process.env.REF_NAME}\` |`,
+              `| Image | [${image}](${packageUrl}) |`,
+              `| Digest | \`${process.env.DIGEST}\` |`,
+              '',
+              '**Tags**',
+              '```',
+              process.env.TAGS.trim(),
+              '```',
+            ].join('\n');
             const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
             const previous = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
             if (previous) {
@@ -914,13 +938,15 @@ jobs:
           REF_NAME: ${{ steps.report_vars.outputs.ref_name }}
           PR_NUMBER: ${{ needs['ref-build'].outputs.pr_number }}
           IMAGE_TAG: ${{ needs['ref-build'].outputs.image_tag }}
+          IMAGE_SUFFIX: ${{ needs['ref-build'].outputs.image_suffix }}
           VERIFIED: ${{ steps.report.outputs.verified }}
           SLSA_REPORT: ${{ steps.report.outputs.summary_markdown }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const issueNumber = Number(process.env.PR_NUMBER);
-            const marker = '<!-- docker-meta -->';
+            const suffix = process.env.IMAGE_SUFFIX;
+            const marker = `<!-- docker-meta${suffix ? ': ' + suffix : ''} -->`;
 
             if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
               core.setFailed(
@@ -929,36 +955,36 @@ jobs:
               return;
             }
 
-            const repositoryUrl =
-              `${context.serverUrl}/${owner}/${repo}`;
-            const packageUrl =
-              `${repositoryUrl}/pkgs/container/${encodeURIComponent(repo)}`;
+            const image = process.env.IMAGE;
+            const imageTag = process.env.IMAGE_TAG.trim();
+            const [, org, pkgPath] = image.match(/ghcr\.io\/([^/]+)\/(.+)/) || [];
+            const encoded = pkgPath ? pkgPath.split('/').map(encodeURIComponent).join('%2F') : '';
+            const packageUrl = org
+              ? `https://github.com/orgs/${org}/packages/container/package/${encoded}`
+              : `${context.serverUrl}/${owner}/${repo}/pkgs/container/${encodeURIComponent(repo)}`;
             const workflowRunUrl =
-              `${repositoryUrl}/actions/runs/${context.runId}`;
+              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
 
-            const body = `${marker}
-            ## Docker image metadata (merge)
-
-            | Property | Value |
-            |---|---|
-            | Ref | \`${process.env.REF_NAME}\` |
-            | Container package | [\`${process.env.IMAGE}\`](${packageUrl}) |
-            | Digest | \`${process.env.DIGEST}\` |
-            | Subject | \`${process.env.SUBJECT}\` |
-            | SLSA verified | ${process.env.VERIFIED === 'true' ? '✅ Yes' : '❌ No'} |
-            | Workflow run | [View verification run](${workflowRunUrl}) |
-
-            <details>
-            <summary>Tags</summary>
-
-            \`\`\`text
-            ${process.env.IMAGE_TAG}
-            \`\`\`
-
-            </details>
-
-            ${process.env.SLSA_REPORT || ''}
-            `;
+            const body = [
+              marker,
+              `## Docker image metadata — \`${imageTag}\``,
+              '',
+              '| Property | Value |',
+              '|---|---|',
+              `| Ref | \`${process.env.REF_NAME}\` |`,
+              `| Image | [${image}](${packageUrl}) |`,
+              `| Digest | \`${process.env.DIGEST}\` |`,
+              `| Subject | \`${process.env.SUBJECT}\` |`,
+              `| SLSA verified | ${process.env.VERIFIED === 'true' ? '✅ Yes' : '❌ No'} |`,
+              `| Workflow run | [View verification run](${workflowRunUrl}) |`,
+              '',
+              '**Tags**',
+              '```',
+              imageTag,
+              '```',
+              '',
+              process.env.SLSA_REPORT || '',
+            ].join('\n');
 
             const comments = await github.paginate(
               github.rest.issues.listComments,
