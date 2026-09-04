@@ -277,14 +277,21 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
 
       - name: Export extra-env-json as masked env vars
-        if: ${{ secrets.extra-env-json != '' }}
+        # The `secrets` context is not allowed in step `if:` expressions
+        # (confirmed via actionlint — using it there makes the whole
+        # workflow file fail GitHub's static validation, with zero jobs
+        # ever created). Always run the step; check emptiness inside the
+        # script instead, where secrets are just interpolated text.
         shell: bash
         run: |
           set -euo pipefail
-          echo '${{ secrets.extra-env-json }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
-            echo "::add-mask::$value"
-            echo "$key=$value" >> "$GITHUB_ENV"
-          done
+          JSON='${{ secrets.extra-env-json }}'
+          if [ -n "$JSON" ]; then
+            echo "$JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
+              echo "::add-mask::$value"
+              echo "$key=$value" >> "$GITHUB_ENV"
+            done
+          fi
 
       - name: Write backend.hcl
         if: ${{ inputs.backend-config != '' }}
@@ -323,10 +330,13 @@ jobs:
       - name: Render plan summary
         working-directory: ${{ inputs.working-directory }}
         run: |
+          set -euo pipefail
           terraform show -json plan.tfplan | terraform-j2md > terraform-plan.md
-          echo "📝️ Terraform plan" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          cat terraform-plan.md >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "📝️ Terraform plan"
+            echo ""
+            cat terraform-plan.md
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Add plan to PR comment
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2
@@ -372,14 +382,21 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
 
       - name: Export extra-env-json as masked env vars
-        if: ${{ secrets.extra-env-json != '' }}
+        # The `secrets` context is not allowed in step `if:` expressions
+        # (confirmed via actionlint — using it there makes the whole
+        # workflow file fail GitHub's static validation, with zero jobs
+        # ever created). Always run the step; check emptiness inside the
+        # script instead, where secrets are just interpolated text.
         shell: bash
         run: |
           set -euo pipefail
-          echo '${{ secrets.extra-env-json }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
-            echo "::add-mask::$value"
-            echo "$key=$value" >> "$GITHUB_ENV"
-          done
+          JSON='${{ secrets.extra-env-json }}'
+          if [ -n "$JSON" ]; then
+            echo "$JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
+              echo "::add-mask::$value"
+              echo "$key=$value" >> "$GITHUB_ENV"
+            done
+          fi
 
       - name: Write backend.hcl
         if: ${{ inputs.backend-config != '' }}
