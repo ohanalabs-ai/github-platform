@@ -230,6 +230,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      id-token: write # job-level permissions REPLACE, not merge with, the workflow-level default above -- must be repeated here for aws-actions/configure-aws-credentials to get a token
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
@@ -304,6 +305,7 @@ jobs:
       TF_IN_AUTOMATION: true
     permissions:
       contents: read
+      id-token: write # job-level permissions REPLACE, not merge with, the workflow-level default -- must be repeated here for aws-actions/configure-aws-credentials to get a token
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
