@@ -147,6 +147,37 @@ on:
         type: boolean
         default: false
 
+      expected-deploy-events:
+        description: >-
+          Comma-separated allowlist of github.event_name values deploy/destroy
+          are permitted to run under, checked in addition to run-deploy/
+          run-destroy — a third, structural gate independent of what the
+          caller's own run-deploy/run-destroy expression computed. Default
+          "workflow_dispatch" only. IMPORTANT if adding "pull_request": a
+          pull_request event's github.ref is refs/pull/<N>/merge, never
+          refs/heads/<branch> — it will NEVER satisfy a GitHub Environment's
+          "restrict to branch main" deployment-branch policy. To actually
+          deploy once code lands on main, use a `push` (branches: [main])
+          trigger instead and include "push" here, not "pull_request".
+        required: false
+        type: string
+        default: workflow_dispatch
+
+      agent-validated:
+        description: >-
+          Explicit bypass of the target Environment's required-reviewer
+          pause, for an automated caller (e.g. an agent) that has already
+          validated the plan itself and is not a human waiting at a "Review
+          deployments" prompt. Does NOT bypass run-deploy/run-destroy or
+          expected-deploy-events — those still gate whether this runs at
+          all. Restricting WHO may set this to true is the CALLING repo's
+          responsibility (e.g. restrict which actors/branches can trigger
+          workflow_dispatch at all) — this workflow only provides the
+          mechanism, not caller-identity enforcement.
+        required: false
+        type: boolean
+        default: false
+
     secrets:
       extra-env-json:
         description: >-
@@ -369,7 +400,9 @@ jobs:
 
   deploy:
     name: 🚀 deploy
-    if: ${{ inputs.run-deploy }}
+    # agent-validated callers use deploy-unattended below instead (same
+    # steps, no Environment reference -- see that job for why).
+    if: ${{ inputs.run-deploy && !inputs.agent-validated && contains(format(',{0},', inputs.expected-deploy-events), format(',{0},', github.event_name)) }}
     needs: [plan]
     runs-on: ${{ inputs.github-actions-runner }}
     environment:
@@ -446,9 +479,81 @@ jobs:
           fi
           terraform apply -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }}
 
+  # Identical to deploy above, minus the environment: block -- for a caller
+  # (e.g. an agent) that already validated the plan itself and sets
+  # agent-validated: true to skip the target Environment's required-reviewer
+  # pause. GitHub Actions has no way to conditionally omit a job's
+  # environment: at runtime (only values within an existing key can be
+  # expressions), hence the duplicated job rather than one toggled job.
+  # Restricting WHO may set agent-validated is the calling repo's own
+  # responsibility (see that input's description).
+  deploy-unattended:
+    name: 🚀 deploy (agent-validated, unattended)
+    if: ${{ inputs.run-deploy && inputs.agent-validated && contains(format(',{0},', inputs.expected-deploy-events), format(',{0},', github.event_name)) }}
+    needs: [plan]
+    runs-on: ${{ inputs.github-actions-runner }}
+    env:
+      TF_IN_AUTOMATION: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials via OIDC
+        if: ${{ inputs.aws-role-arn != '' }}
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Export extra-env-json as masked env vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          JSON='${{ secrets.extra-env-json }}'
+          if [ -n "$JSON" ]; then
+            echo "$JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
+              echo "::add-mask::$value"
+              echo "$key=$value" >> "$GITHUB_ENV"
+            done
+          fi
+
+      - name: Write backend.hcl
+        if: ${{ inputs.backend-config != '' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          cat > backend.hcl <<'EOF'
+          ${{ inputs.backend-config }}
+          EOF
+
+      - name: terraform init
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f backend.hcl ]; then
+            terraform init -backend-config=backend.hcl
+          else
+            terraform init
+          fi
+
+      - name: terraform apply
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          VAR_FILE_ARG=""
+          if [ -n "${{ inputs.var-file }}" ]; then
+            VAR_FILE_ARG="-var-file=${{ inputs.var-file }}"
+          fi
+          terraform apply -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }}
+
   destroy:
     name: 🧨 destroy
-    if: ${{ inputs.run-destroy }}
+    # agent-validated callers use destroy-unattended below instead.
+    if: ${{ inputs.run-destroy && !inputs.agent-validated && contains(format(',{0},', inputs.expected-deploy-events), format(',{0},', github.event_name)) }}
     needs: [plan]
     runs-on: ${{ inputs.github-actions-runner }}
     environment:
@@ -459,6 +564,72 @@ jobs:
     permissions:
       contents: read
       id-token: write # job-level permissions REPLACE, not merge with, the workflow-level default -- must be repeated here for aws-actions/configure-aws-credentials to get a token
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials via OIDC
+        if: ${{ inputs.aws-role-arn != '' }}
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Export extra-env-json as masked env vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          JSON='${{ secrets.extra-env-json }}'
+          if [ -n "$JSON" ]; then
+            echo "$JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
+              echo "::add-mask::$value"
+              echo "$key=$value" >> "$GITHUB_ENV"
+            done
+          fi
+
+      - name: Write backend.hcl
+        if: ${{ inputs.backend-config != '' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          cat > backend.hcl <<'EOF'
+          ${{ inputs.backend-config }}
+          EOF
+
+      - name: terraform init
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f backend.hcl ]; then
+            terraform init -backend-config=backend.hcl
+          else
+            terraform init
+          fi
+
+      - name: terraform destroy
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          VAR_FILE_ARG=""
+          if [ -n "${{ inputs.var-file }}" ]; then
+            VAR_FILE_ARG="-var-file=${{ inputs.var-file }}"
+          fi
+          terraform destroy -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }}
+
+  # Identical to destroy above, minus the environment: block -- see
+  # deploy-unattended's comment for why this is a separate job rather than
+  # a toggle on one job.
+  destroy-unattended:
+    name: 🧨 destroy (agent-validated, unattended)
+    if: ${{ inputs.run-destroy && inputs.agent-validated && contains(format(',{0},', inputs.expected-deploy-events), format(',{0},', github.event_name)) }}
+    needs: [plan]
+    runs-on: ${{ inputs.github-actions-runner }}
+    env:
+      TF_IN_AUTOMATION: true
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
