@@ -63,7 +63,20 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `terraform-environment-url` | `""` | URL shown on a successful deployment in the GitHub UI |
 | `run-deploy` | `false` | Explicit opt-in to run the `deploy` (apply) job at all. This is a second, independent gate on top of the target Environment's own protection rules — set `true` only from a path a human explicitly triggered for an apply (e.g. a `workflow_dispatch` with an `action: apply` choice), never from a PR-triggered call |
 
-No `secrets:` block is required — AWS auth goes through OIDC (`id-token: write`), not a static credential.
+## Secrets
+
+| Secret | Description |
+|---|---|
+| `extra-env-json` | Optional JSON object of `{ENV_VAR: value}` pairs, exported as masked env vars before `init`/`plan`/`apply`. Use this for any provider beyond AWS that your Terraform config needs credentials for — e.g. a Tailscale provider needing `TAILSCALE_OAUTH_CLIENT_ID`/`_SECRET`. Not required — AWS auth itself goes through OIDC (`id-token: write`), not a static credential. |
+
+```yaml
+    secrets:
+      extra-env-json: |
+        {
+          "TAILSCALE_OAUTH_CLIENT_ID": "${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}",
+          "TAILSCALE_OAUTH_CLIENT_SECRET": "${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}"
+        }
+```
 
 ## Jobs
 
