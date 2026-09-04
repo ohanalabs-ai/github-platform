@@ -30,6 +30,14 @@
 #   - Declared `SLACK_CHANNEL_AUTOMATION_ID`/`_TOKEN` secrets existed in the
 #     original but were never referenced by any step in its body — dropped
 #     as dead declarations rather than carried forward unused.
+#   - Added `run-deploy` (default false): the original's `deploy` job (like
+#     this one) has no `if:` gate of its own — it relies entirely on the
+#     target GitHub Environment's own protection rules to pause `apply`.
+#     That's a single point of failure if that Environment is ever
+#     misconfigured or doesn't exist yet (GitHub auto-creates an unprotected
+#     Environment on first use). `run-deploy` is a second, independent,
+#     structural gate: it must be explicitly set true for the deploy job to
+#     even attempt to run, regardless of Environment config.
 name: 🌎 terraform-devsecops-workflow
 
 on:
@@ -104,6 +112,18 @@ on:
         required: false
         type: string
         default: ""
+
+      run-deploy:
+        description: >-
+          Explicit opt-in to run the deploy (terraform apply) job at all.
+          Defaults to false so a plan-only invocation (e.g. from a PR) can
+          never reach apply regardless of the target GitHub Environment's
+          own protection rules — those are a second, independent gate, not
+          the only one. Set true only from a workflow_dispatch (or
+          equivalent) path that a human explicitly triggered for an apply.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -251,6 +271,7 @@ jobs:
 
   deploy:
     name: 🚀 deploy
+    if: ${{ inputs.run-deploy }}
     needs: [plan]
     runs-on: ${{ inputs.github-actions-runner }}
     environment:
