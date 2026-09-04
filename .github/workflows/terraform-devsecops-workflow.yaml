@@ -1,0 +1,301 @@
+# 🌎 Reusable Terraform DevSecOps workflow — lint/validate, an optional
+# shift-left security scan (tfsec + terrascan), a plan step that comments the
+# result directly on the PR, and an environment-gated apply.
+#
+# This is a reviewed, genericized copy of
+# vionix-proj/vionix-github's .github/workflows/terraform-devsecops-workflow.yaml.
+# See products/devsecops-terraform/README.md in this repo for usage and an
+# explicit list of what changed from the original and why:
+#
+#   - Dropped the private `Viasat/vionix/actions/build/config-stream-decoder`
+#     action and the `ARTIFACTORY_SVC_USER`/`ARTIFACTORY_SVC_PASS` secrets —
+#     replaced with standard AWS OIDC (`aws-actions/configure-aws-credentials`)
+#     so any repo with a GitHub OIDC trust relationship can call this, not
+#     just repos with access to Viasat-internal Artifactory.
+#   - Dropped the `docker compose run terraform-*` service-name contract (it
+#     required every caller to ship a docker-compose.yaml with services named
+#     exactly `terraform-validate`/`terraform-plan`/`terraform-apply`/
+#     `terraform-tfsec`) — replaced with `hashicorp/setup-terraform` + plain
+#     `terraform` CLI, so any repo with a Terraform root module can call this
+#     with no extra contract.
+#   - Dropped the custom `vionix` self-hosted runner default in favor of
+#     `ubuntu-latest`, matching this repo's other reusable workflows
+#     (docker-multiarch-cicd.yaml, actions-pin-version-setting-lint.yaml) —
+#     still overridable via `github-actions-runner`.
+#   - The tfsec SARIF upload from the original depended on a
+#     `terraform-check.sarif.json` file produced by the removed docker step;
+#     that step is not reproduced here (tfsec's own SARIF output would need
+#     wiring in a follow-up — see the README). tfsec's PR-comment path and
+#     terrascan's SARIF upload are both self-contained and kept as-is.
+#   - Declared `SLACK_CHANNEL_AUTOMATION_ID`/`_TOKEN` secrets existed in the
+#     original but were never referenced by any step in its body — dropped
+#     as dead declarations rather than carried forward unused.
+name: 🌎 terraform-devsecops-workflow
+
+on:
+  workflow_call:
+    inputs:
+      github-actions-runner:
+        description: "Runner to use for every job in this workflow"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+      working-directory:
+        description: "Directory containing the Terraform root module"
+        required: false
+        type: string
+        default: terraform
+
+      terraform-version:
+        description: "Terraform CLI version to install via hashicorp/setup-terraform"
+        required: false
+        type: string
+        default: "1.9.8"
+
+      backend-config:
+        description: >-
+          Backend config lines (e.g. bucket/key/region/dynamodb_table for an
+          S3 backend), one per line, written to a generated backend.hcl
+          before `terraform init`. Leave empty to init without a remote
+          backend (e.g. for a repo that only wants lint/validate/check).
+        required: false
+        type: string
+        default: ""
+
+      var-file:
+        description: "Path, relative to working-directory, to a .tfvars file passed as -var-file. Empty for none."
+        required: false
+        type: string
+        default: ""
+
+      extra-args:
+        description: "Extra space-separated -var=... (or other) flags appended to plan/apply"
+        required: false
+        type: string
+        default: ""
+
+      aws-region:
+        description: "AWS region for OIDC auth. Leave both this and aws-role-arn empty to skip AWS auth entirely."
+        required: false
+        type: string
+        default: ""
+
+      aws-role-arn:
+        description: "IAM role ARN to assume via GitHub OIDC. Leave both this and aws-region empty to skip AWS auth entirely."
+        required: false
+        type: string
+        default: ""
+
+      enable-shift-left-scan:
+        description: "Run the tfsec/terrascan security-scan matrix job. terrascan expects a terrascan-config.toml at the repo root when enabled."
+        required: false
+        type: boolean
+        default: false
+
+      terraform-environment-name:
+        description: "GitHub Environment the deploy job runs under (Settings -> Environments) — use this for required-reviewer apply gating"
+        required: false
+        type: string
+        default: default
+
+      terraform-environment-url:
+        description: "URL shown on a successful deployment in the GitHub UI. Empty to omit."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write # for aws-actions/configure-aws-credentials (OIDC) — no-op if aws-role-arn is empty
+
+jobs:
+  lint:
+    name: 🚨 lint
+    runs-on: ${{ inputs.github-actions-runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: terraform fmt -check
+        working-directory: ${{ inputs.working-directory }}
+        run: terraform fmt -check -recursive
+
+      - name: terraform init (no backend) + validate
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  check:
+    name: 🛡️️ check
+    if: ${{ inputs.enable-shift-left-scan }}
+    needs: [lint]
+    runs-on: ${{ inputs.github-actions-runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        checkType: [terrascan, tfsec]
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Add tfsec comments to PR
+        if: ${{ matrix.checkType == 'tfsec' }}
+        uses: aquasecurity/tfsec-pr-commenter-action@7a44c5dcde5dfab737363e391800629e27b6376b # v1.3.1
+        with:
+          soft_fail_commenter: true
+          working_directory: ${{ inputs.working-directory }}
+          github_token: ${{ github.token }}
+
+      - name: Run Terrascan
+        if: ${{ matrix.checkType == 'terrascan' }}
+        id: terrascan
+        uses: tenable/terrascan-action@dd7e921056c6f25b25bff3cf791e063ed7fc3a78 # v1.5.0
+        with:
+          iac_type: 'terraform'
+          iac_dir: ${{ inputs.working-directory }}
+          policy_type: 'aws'
+          only_warn: true
+          sarif_upload: true
+          config_path: terrascan-config.toml
+
+      - name: Upload SARIF file for terrascan
+        if: ${{ matrix.checkType == 'terrascan' }}
+        uses: github/codeql-action/upload-sarif@820e3160e279568db735cee8ed8f8e77a6da7818 # v3.32.6
+        with:
+          sarif_file: terrascan.sarif
+          category: terrascan
+
+  plan:
+    name: 📝️ plan
+    needs: [lint]
+    runs-on: ${{ inputs.github-actions-runner }}
+    strategy:
+      fail-fast: true
+    env:
+      TF_IN_AUTOMATION: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Configure AWS credentials via OIDC
+        if: ${{ inputs.aws-role-arn != '' }}
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Write backend.hcl
+        if: ${{ inputs.backend-config != '' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          cat > backend.hcl <<'EOF'
+          ${{ inputs.backend-config }}
+          EOF
+
+      - name: terraform init
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f backend.hcl ]; then
+            terraform init -backend-config=backend.hcl
+          else
+            terraform init
+          fi
+
+      - name: terraform plan
+        id: plan
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          VAR_FILE_ARG=""
+          if [ -n "${{ inputs.var-file }}" ]; then
+            VAR_FILE_ARG="-var-file=${{ inputs.var-file }}"
+          fi
+          terraform plan -no-color -out=plan.tfplan $VAR_FILE_ARG ${{ inputs.extra-args }} | tee plan.txt
+
+      - name: Convert plan to markdown
+        if: always() && (steps.plan.outcome == 'success' || steps.plan.outcome == 'failure')
+        uses: reproio/terraform-j2md@92a5431c6a32baf8321bc57c9408f3972b161a77 # v0.0.9
+        with:
+          version: v0.0.9
+
+      - name: Render plan summary
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          terraform show -json plan.tfplan | terraform-j2md > terraform-plan.md
+          echo "📝️ Terraform plan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat terraform-plan.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Add plan to PR comment
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2
+        if: github.event_name == 'pull_request'
+        with:
+          recreate: true
+          path: ${{ inputs.working-directory }}/terraform-plan.md
+
+  deploy:
+    name: 🚀 deploy
+    needs: [plan]
+    runs-on: ${{ inputs.github-actions-runner }}
+    environment:
+      name: ${{ inputs.terraform-environment-name }}
+      url: ${{ inputs.terraform-environment-url }}
+    env:
+      TF_IN_AUTOMATION: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Configure AWS credentials via OIDC
+        if: ${{ inputs.aws-role-arn != '' }}
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Write backend.hcl
+        if: ${{ inputs.backend-config != '' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          cat > backend.hcl <<'EOF'
+          ${{ inputs.backend-config }}
+          EOF
+
+      - name: terraform init
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f backend.hcl ]; then
+            terraform init -backend-config=backend.hcl
+          else
+            terraform init
+          fi
+
+      - name: terraform apply
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          VAR_FILE_ARG=""
+          if [ -n "${{ inputs.var-file }}" ]; then
+            VAR_FILE_ARG="-var-file=${{ inputs.var-file }}"
+          fi
+          terraform apply -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }}

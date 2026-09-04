@@ -1,6 +1,15 @@
-# shared-workflows
+# github-platform
 
-Reusable GitHub Actions workflows for organization-wide automation.
+Reusable GitHub Actions workflows for organization-wide automation. (Formerly
+`shared-workflows` — this repo was renamed; update any bookmarked
+`vionix-proj/shared-workflows/...` `uses:` references to `vionix-proj/github-platform/...`.)
+
+## Products
+
+Each reusable workflow has its own usage doc under `products/`:
+
+- [`products/devsecops-docker/`](products/devsecops-docker/README.md) — `docker-multiarch-cicd.yaml`
+- [`products/devsecops-terraform/`](products/devsecops-terraform/README.md) — `terraform-devsecops-workflow.yaml`
 
 ## Reusable workflow: `docker-multiarch-cicd`
 
@@ -18,7 +27,7 @@ on:
 
 jobs:
   docker-multiarch:
-    uses: vionix-proj/shared-workflows/.github/workflows/docker-multiarch-cicd.yaml@main
+    uses: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
     with:
       registry: ghcr.io
       target-service: gha-fix
