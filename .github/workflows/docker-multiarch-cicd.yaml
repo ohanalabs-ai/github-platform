@@ -718,7 +718,7 @@ jobs:
               }
 
               const prerelease =
-                /(?:^|[-.])(alpha|beta|rc|pre)(?:[-.\d]|$)/i.test(tag);
+                /(?:^|[-.])(alpha|beta|rc|pre)(?:[-.\/\d]|$)/i.test(tag);
 
               core.info(
                 `No GitHub Release exists for tag ${tag}; ` +
