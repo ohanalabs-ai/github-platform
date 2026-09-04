@@ -7,7 +7,11 @@ This is a reviewed, genericized copy of `vionix-proj/vionix-github`'s `.github/w
 ## Usage
 
 ```yaml
-name: terraform
+# Every workflow that calls a reusable workflow MUST have a name: prefixed
+# with a distinguishing emoji and a descriptive run-name: — see
+# skills/github-actions-cicd/SKILL.md in the claude-agents repo.
+name: 🌎 terraform-devsecops-workflow
+run-name: 🌎 Terraform plan and gated apply/destroy for the production env
 
 on:
   pull_request:
@@ -17,7 +21,7 @@ on:
     inputs:
       action:
         type: choice
-        options: [plan, apply]
+        options: [plan, apply, destroy]
         default: plan
 
 jobs:
@@ -37,10 +41,14 @@ jobs:
       aws-role-arn: arn:aws:iam::123456789012:role/my-terraform-ci-role
       enable-shift-left-scan: true
       terraform-environment-name: production
+      run-deploy: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'apply' }}
+      run-destroy: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' }}
     permissions:
       contents: read
       id-token: write
       pull-requests: write
+      actions: read
+      security-events: write
 ```
 
 Always reference `@main` — this is an internal, org-owned workflow repo, so callers are expected to track the latest reviewed version rather than pin a SHA (unlike third-party actions, which this org's own `actions-pin-version-setting-lint.yaml` requires pinning).
@@ -62,6 +70,7 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `terraform-environment-name` | `default` | GitHub Environment the `deploy` job runs under — use this for required-reviewer apply gating |
 | `terraform-environment-url` | `""` | URL shown on a successful deployment in the GitHub UI |
 | `run-deploy` | `false` | Explicit opt-in to run the `deploy` (apply) job at all. This is a second, independent gate on top of the target Environment's own protection rules — set `true` only from a path a human explicitly triggered for an apply (e.g. a `workflow_dispatch` with an `action: apply` choice), never from a PR-triggered call |
+| `run-destroy` | `false` | Explicit opt-in to run the `destroy` job at all. Same shape and reasoning as `run-deploy`. Mutually exclusive with `run-deploy` — `validate-inputs` fails fast if both are true |
 
 ## Secrets
 
@@ -85,6 +94,7 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 - **🛡️️ check** *(opt-in via `enable-shift-left-scan`)* — tfsec (PR-comment) and terrascan (SARIF upload to the Security tab) in a matrix.
 - **📝️ plan** — real `terraform init`/`plan` against the configured backend, rendered as a sticky PR comment and appended to the job summary.
 - **🚀 deploy** — `terraform apply -auto-approve`, gated behind the named GitHub Environment (configure required reviewers there for manual approval before this job runs).
+- **🧨 destroy** *(opt-in via `run-destroy`)* — `terraform destroy -auto-approve`, gated the same way as `deploy` (same Environment, same required-reviewer pause). Mutually exclusive with `run-deploy`.
 
 ## Prerequisites for a calling repo
 
