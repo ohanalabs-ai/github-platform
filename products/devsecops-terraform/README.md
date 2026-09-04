@@ -71,6 +71,8 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `terraform-environment-url` | `""` | URL shown on a successful deployment in the GitHub UI |
 | `run-deploy` | `false` | Explicit opt-in to run the `deploy` (apply) job at all. This is a second, independent gate on top of the target Environment's own protection rules — set `true` only from a path a human explicitly triggered for an apply (e.g. a `workflow_dispatch` with an `action: apply` choice), never from a PR-triggered call |
 | `run-destroy` | `false` | Explicit opt-in to run the `destroy` job at all. Same shape and reasoning as `run-deploy`. Mutually exclusive with `run-deploy` — `validate-inputs` fails fast if both are true |
+| `expected-deploy-events` | `workflow_dispatch` | Comma-separated allowlist of `github.event_name` values `deploy`/`destroy` may run under — a third, independent gate on top of `run-deploy`/`run-destroy`. To deploy on merge to `main`, use a `push` (`branches: [main]`) trigger and include `push` here — **not** `pull_request`, whose `github.ref` never resolves to `refs/heads/main` and so can never satisfy a GitHub Environment's branch-restriction policy |
+| `agent-validated` | `false` | Skip the target Environment's required-reviewer pause, for a caller (e.g. an agent) that already validated the plan itself. Mechanism: `deploy`/`destroy` reference the Environment `<terraform-environment-name>-unattended` instead of `<terraform-environment-name>` — same job, a different (by default unprotected) Environment name, not a duplicated job. Restricting *who* may set this true is the calling repo's own responsibility |
 
 ## Secrets
 
@@ -93,8 +95,8 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 - **🚨 lint** — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`. Runs with no AWS credentials at all.
 - **🛡️️ check** *(opt-in via `enable-shift-left-scan`)* — tfsec (PR-comment) and terrascan (SARIF upload to the Security tab) in a matrix.
 - **📝️ plan** — real `terraform init`/`plan` against the configured backend, rendered as a sticky PR comment and appended to the job summary.
-- **🚀 deploy** — `terraform apply -auto-approve`, gated behind the named GitHub Environment (configure required reviewers there for manual approval before this job runs).
-- **🧨 destroy** *(opt-in via `run-destroy`)* — `terraform destroy -auto-approve`, gated the same way as `deploy` (same Environment, same required-reviewer pause). Mutually exclusive with `run-deploy`.
+- **🚀 deploy** — `terraform apply -auto-approve`, gated behind the named GitHub Environment (configure required reviewers there for manual approval before this job runs). Set `agent-validated: true` to point it at `<terraform-environment-name>-unattended` instead, skipping that pause.
+- **🧨 destroy** *(opt-in via `run-destroy`)* — `terraform destroy -auto-approve`, gated the same way as `deploy` (same Environment, same required-reviewer pause, same `agent-validated` mechanism). Mutually exclusive with `run-deploy`.
 
 ## Prerequisites for a calling repo
 
