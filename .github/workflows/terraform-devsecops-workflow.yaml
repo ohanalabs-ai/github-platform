@@ -96,10 +96,16 @@ on:
         default: ""
 
       enable-shift-left-scan:
-        description: "Run the tfsec/terrascan security-scan matrix job. terrascan expects a terrascan-config.toml at the repo root when enabled."
+        description: "Run the tfsec/terrascan security-scan matrix job."
         required: false
         type: boolean
         default: false
+
+      terrascan-config-path:
+        description: "Path to terrascan's config file, only read when enable-shift-left-scan is true"
+        required: false
+        type: string
+        default: terrascan-config.toml
 
       terraform-environment-name:
         description: "GitHub Environment the deploy job runs under (Settings -> Environments) — use this for required-reviewer apply gating"
@@ -130,8 +136,25 @@ permissions:
   id-token: write # for aws-actions/configure-aws-credentials (OIDC) — no-op if aws-role-arn is empty
 
 jobs:
+  validate-inputs:
+    name: 🔍 validate-inputs
+    runs-on: ${{ inputs.github-actions-runner }}
+    steps:
+      - name: Check aws-region/aws-role-arn are both set or both empty
+        if: ${{ (inputs.aws-region != '' && inputs.aws-role-arn == '') || (inputs.aws-region == '' && inputs.aws-role-arn != '') }}
+        run: |
+          echo "::error::aws-region and aws-role-arn must either both be set (to enable AWS OIDC auth) or both be empty (to skip it) — got aws-region='${{ inputs.aws-region }}' aws-role-arn='${{ inputs.aws-role-arn }}'"
+          exit 1
+
+      - name: Check enable-shift-left-scan has a config path
+        if: ${{ inputs.enable-shift-left-scan && inputs.terrascan-config-path == '' }}
+        run: |
+          echo "::error::terrascan-config-path cannot be empty when enable-shift-left-scan is true"
+          exit 1
+
   lint:
     name: 🚨 lint
+    needs: [validate-inputs]
     runs-on: ${{ inputs.github-actions-runner }}
     permissions:
       contents: read
@@ -187,7 +210,7 @@ jobs:
           policy_type: 'aws'
           only_warn: true
           sarif_upload: true
-          config_path: terrascan-config.toml
+          config_path: ${{ inputs.terrascan-config-path }}
 
       - name: Upload SARIF file for terrascan
         if: ${{ matrix.checkType == 'terrascan' }}
