@@ -131,6 +131,19 @@ on:
         type: boolean
         default: false
 
+    secrets:
+      extra-env-json:
+        description: >-
+          Optional JSON object of {ENV_VAR: value} pairs, exported as masked
+          env vars before terraform init/plan/apply. For any provider beyond
+          AWS that this Terraform config needs credentials for (e.g. a
+          Tailscale provider needing TAILSCALE_OAUTH_CLIENT_ID/_SECRET) —
+          verified live: eks-cluster's config also configures a tailscale
+          provider, and without a way to pass its credentials through,
+          terraform plan correctly errored with "Provider credentials
+          error" (a real, expected failure, not a bug in this workflow).
+        required: false
+
 permissions:
   contents: read
   id-token: write # for aws-actions/configure-aws-credentials (OIDC) — no-op if aws-role-arn is empty
@@ -164,6 +177,15 @@ jobs:
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ inputs.terraform-version }}
+          # The wrapper script (the default) captures terraform's exit code
+          # as a step OUTPUT but does not propagate it as the step's own
+          # exit status -- a real `terraform plan`/`apply` error would still
+          # report the step (and job) as successful. Verified live: a plan
+          # that hit "Error: Provider credentials error" and exited 1 was
+          # still reported success by the wrapped step. Disabling the
+          # wrapper makes the raw terraform binary's exit code propagate
+          # natively.
+          terraform_wrapper: false
 
       - name: terraform fmt -check
         working-directory: ${{ inputs.working-directory }}
@@ -237,6 +259,15 @@ jobs:
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ inputs.terraform-version }}
+          # The wrapper script (the default) captures terraform's exit code
+          # as a step OUTPUT but does not propagate it as the step's own
+          # exit status -- a real `terraform plan`/`apply` error would still
+          # report the step (and job) as successful. Verified live: a plan
+          # that hit "Error: Provider credentials error" and exited 1 was
+          # still reported success by the wrapped step. Disabling the
+          # wrapper makes the raw terraform binary's exit code propagate
+          # natively.
+          terraform_wrapper: false
 
       - name: Configure AWS credentials via OIDC
         if: ${{ inputs.aws-role-arn != '' }}
@@ -244,6 +275,16 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Export extra-env-json as masked env vars
+        if: ${{ secrets.extra-env-json != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '${{ secrets.extra-env-json }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
+            echo "::add-mask::$value"
+            echo "$key=$value" >> "$GITHUB_ENV"
+          done
 
       - name: Write backend.hcl
         if: ${{ inputs.backend-config != '' }}
@@ -266,6 +307,7 @@ jobs:
         id: plan
         working-directory: ${{ inputs.working-directory }}
         run: |
+          set -euo pipefail
           VAR_FILE_ARG=""
           if [ -n "${{ inputs.var-file }}" ]; then
             VAR_FILE_ARG="-var-file=${{ inputs.var-file }}"
@@ -312,6 +354,15 @@ jobs:
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ inputs.terraform-version }}
+          # The wrapper script (the default) captures terraform's exit code
+          # as a step OUTPUT but does not propagate it as the step's own
+          # exit status -- a real `terraform plan`/`apply` error would still
+          # report the step (and job) as successful. Verified live: a plan
+          # that hit "Error: Provider credentials error" and exited 1 was
+          # still reported success by the wrapped step. Disabling the
+          # wrapper makes the raw terraform binary's exit code propagate
+          # natively.
+          terraform_wrapper: false
 
       - name: Configure AWS credentials via OIDC
         if: ${{ inputs.aws-role-arn != '' }}
@@ -319,6 +370,16 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Export extra-env-json as masked env vars
+        if: ${{ secrets.extra-env-json != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '${{ secrets.extra-env-json }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' | while IFS='=' read -r key value; do
+            echo "::add-mask::$value"
+            echo "$key=$value" >> "$GITHUB_ENV"
+          done
 
       - name: Write backend.hcl
         if: ${{ inputs.backend-config != '' }}
