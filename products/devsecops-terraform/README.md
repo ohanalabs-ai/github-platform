@@ -60,6 +60,7 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `enable-shift-left-scan` | `false` | Run the tfsec/terrascan matrix job. terrascan expects a `terrascan-config.toml` at the caller repo's root when enabled |
 | `terraform-environment-name` | `default` | GitHub Environment the `deploy` job runs under — use this for required-reviewer apply gating |
 | `terraform-environment-url` | `""` | URL shown on a successful deployment in the GitHub UI |
+| `run-deploy` | `false` | Explicit opt-in to run the `deploy` (apply) job at all. This is a second, independent gate on top of the target Environment's own protection rules — set `true` only from a path a human explicitly triggered for an apply (e.g. a `workflow_dispatch` with an `action: apply` choice), never from a PR-triggered call |
 
 No `secrets:` block is required — AWS auth goes through OIDC (`id-token: write`), not a static credential.
 
