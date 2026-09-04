@@ -57,7 +57,8 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `extra-args` | `""` | Extra space-separated flags appended to `plan`/`apply` (e.g. `-var=...`) |
 | `aws-region` | `""` | AWS region for OIDC auth |
 | `aws-role-arn` | `""` | IAM role ARN to assume via GitHub OIDC. Leave both this and `aws-region` empty to skip AWS auth entirely (e.g. a non-AWS backend) |
-| `enable-shift-left-scan` | `false` | Run the tfsec/terrascan matrix job. terrascan expects a `terrascan-config.toml` at the caller repo's root when enabled |
+| `enable-shift-left-scan` | `false` | Run the tfsec/terrascan matrix job |
+| `terrascan-config-path` | `terrascan-config.toml` | Path to terrascan's config file, only read when `enable-shift-left-scan` is true |
 | `terraform-environment-name` | `default` | GitHub Environment the `deploy` job runs under — use this for required-reviewer apply gating |
 | `terraform-environment-url` | `""` | URL shown on a successful deployment in the GitHub UI |
 | `run-deploy` | `false` | Explicit opt-in to run the `deploy` (apply) job at all. This is a second, independent gate on top of the target Environment's own protection rules — set `true` only from a path a human explicitly triggered for an apply (e.g. a `workflow_dispatch` with an `action: apply` choice), never from a PR-triggered call |
@@ -66,6 +67,7 @@ No `secrets:` block is required — AWS auth goes through OIDC (`id-token: write
 
 ## Jobs
 
+- **🔍 validate-inputs** — fails fast with a clear `::error` if `aws-region`/`aws-role-arn` are inconsistently set (one provided without the other), or if `enable-shift-left-scan` is true with an empty `terrascan-config-path`. Every other job depends on this passing first.
 - **🚨 lint** — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`. Runs with no AWS credentials at all.
 - **🛡️️ check** *(opt-in via `enable-shift-left-scan`)* — tfsec (PR-comment) and terrascan (SARIF upload to the Security tab) in a matrix.
 - **📝️ plan** — real `terraform init`/`plan` against the configured backend, rendered as a sticky PR comment and appended to the job summary.
