@@ -83,7 +83,7 @@ on:
         description: Reusable workflow identity used to verify artifact attestations with gh attestation verify.
         required: false
         type: string
-        default: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml
+        default: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml
 
 
     outputs:
@@ -141,7 +141,7 @@ jobs:
 
       - name: Loads docker compose properties
         id: compose-metadata
-        uses: vionix-proj/actions/docker/compose/metadata@main
+        uses: ohanalabs-ai/actions/docker/compose/metadata@main
         with:
           compose-path: ${{ inputs.docker-compose-file-name }}
           target-service: ${{ inputs.docker-compose-target-service }}
@@ -509,7 +509,7 @@ jobs:
 
       - name: Build and attest by ref
         id: ref_build
-        uses: vionix-proj/actions/docker/ref-build@main
+        uses: ohanalabs-ai/actions/docker/ref-build@main
         with:
           registry: ${{ env.REGISTRY }}
           platforms: ${{ env.PLATFORMS }}
@@ -604,7 +604,7 @@ jobs:
 
       - name: Build and attest for release tag
         id: release_ref_build
-        uses: vionix-proj/actions/docker/ref-build@main
+        uses: ohanalabs-ai/actions/docker/ref-build@main
         with:
           registry: ${{ env.REGISTRY }}
           platforms: ${{ env.PLATFORMS }}
@@ -900,7 +900,7 @@ jobs:
 
       - name: Verify SLSA provenance
         id: report
-        uses: vionix-proj/actions/docker/slsa-report@main
+        uses: ohanalabs-ai/actions/docker/slsa-report@main
         with:
           subject: ${{ steps.report_vars.outputs.subject }}
           image-base: ${{ steps.report_vars.outputs.image_base }}
