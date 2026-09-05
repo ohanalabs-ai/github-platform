@@ -38,7 +38,7 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `github-actions-runner` | `ubuntu-latest` | Runner for every job |
 | `yaml-lint-dir` | `.github/workflows` | Directory to yaml-lint |
 | `codeowners-file` | `.github/CODEOWNERS` | Path to the CODEOWNERS file to inspect |
-| `fail-on-missing-team` | `false` | Fail the check when a CODEOWNERS team/user does not exist in the org |
+| `fail-on-missing-team` | `true` | Fail the check when a CODEOWNERS team/user does not exist in the org, when no CODEOWNERS file is found, or when one exists but references no owners at all. Set `false` only for a repo deliberately not requiring CODEOWNERS yet |
 
 ## Secrets
 
@@ -50,7 +50,7 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 
 - **📑 yaml-check** — yamllint over `.github/workflows` (or `yaml-lint-dir`), commenting on the PR. Warnings-only for common style nits (line length, trailing spaces, missing final newline).
 - **🔧 codeowners-check** — `mszostok/codeowners-validator`, twice: once with `files,duppatterns,syntax` (the `files` check tolerates CODEOWNERS entries for paths that don't exist yet), once with just `syntax,duppatterns`.
-- **👥 codeowners-teams** — parses every `@team`/`@user` token out of CODEOWNERS, checks each against the GitHub API (`/orgs/{org}/teams/{slug}` or `/users/{name}`), and publishes a markdown table (step summary + a sticky, upserted PR comment) showing ✅ exists / ❌ missing / ⚠️ unverified for each, plus a one-line summary count. Set `fail-on-missing-team: true` to turn a ❌ into a hard CI failure.
+- **👥 codeowners-teams** — parses every `@team`/`@user` token out of CODEOWNERS, checks each against the GitHub API (`/orgs/{org}/teams/{slug}` or `/users/{name}`), and publishes a markdown table (step summary + a sticky, upserted PR comment) showing ✅ exists / ❌ missing / ⚠️ unverified for each, plus a one-line summary count. **Fails the job by default** (`fail-on-missing-team: true`) on any ❌, on no CODEOWNERS file being found at all, or on a CODEOWNERS file with zero `@owner` references — set `false` explicitly to make any of these advisory-only instead.
 
 ## Prerequisites for a calling repo
 

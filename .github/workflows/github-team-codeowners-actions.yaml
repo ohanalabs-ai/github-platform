@@ -35,10 +35,16 @@ on:
         default: .github/CODEOWNERS
 
       fail-on-missing-team:
-        description: "Fail the check when a CODEOWNERS team/user does not exist in the org"
+        description: >-
+          Fail the check when a CODEOWNERS team/user does not exist in the
+          org, or when no CODEOWNERS file is found at all. Defaults to true
+          -- this workflow's whole purpose is validating CODEOWNERS, so an
+          invalid/missing one should break the check, not just get reported.
+          Set false only for a repo that's deliberately not requiring
+          CODEOWNERS yet and wants this as advisory-only.
         required: false
         type: boolean
-        default: false
+        default: true
 
     secrets:
       org-read-token:
@@ -146,7 +152,12 @@ jobs:
           done
           if [ -z "$F" ]; then
             echo "_No CODEOWNERS file found._" >> "$OUT"
-            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"; exit 0
+            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$FAIL_ON_MISSING" = "true" ]; then
+              echo "::error ::No CODEOWNERS file found (checked \$CODEOWNERS_FILE, .github/CODEOWNERS, CODEOWNERS, docs/CODEOWNERS)"
+              exit 1
+            fi
+            exit 0
           fi
           echo "Source: \`$F\`" >> "$OUT"; echo "" >> "$OUT"
 
@@ -154,7 +165,12 @@ jobs:
           owners=$(sed 's/#.*//' "$F" | tr ' \t' '\n' | grep -E '^@[A-Za-z0-9]' | sort -u || true)
           if [ -z "$owners" ]; then
             echo "_No @team/@user owners referenced._" >> "$OUT"
-            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"; exit 0
+            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$FAIL_ON_MISSING" = "true" ]; then
+              echo "::error ::CODEOWNERS exists at $F but references no @team/@user owners at all"
+              exit 1
+            fi
+            exit 0
           fi
 
           { echo "| Owner | Type | Status | Link |"; echo "|-------|------|--------|------|"; } >> "$OUT"
