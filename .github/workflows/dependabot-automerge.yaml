@@ -1,0 +1,159 @@
+# 🤖 Dependabot PR evidence report — waits for ONE named check (e.g. this
+# repo's own "terraform / 📝️ plan"), posts a sticky PR comment with the
+# dependency metadata + that check's real outcome as evidence for a human's
+# own approve/merge decision, and FAILS the workflow itself (a real red
+# check on the PR, not just a comment someone might not read) if that check
+# did not succeed. Does NOT auto-approve or auto-merge — that stays
+# human-gated. See the sibling capability doc for the full read on what a v2
+# auto-merge version would need (org Actions-approve policy, repo
+# allow_auto_merge) and why this v1 stops short of that deliberately.
+#
+# Inspired by Viasat/vionix's .github/workflows/github-ghas-dependabot-reviews.yaml
+# (docs/workflows/github-ghas-dependabot-reviews.md), which hard-requires GitHub
+# Advanced Security (GHAS) -- every job downstream of its own ghas-status check
+# skips entirely if GHAS isn't enabled. Checked live against
+# planeodev/eks-cluster: GHAS is "disabled" there, which would make a straight
+# port of that workflow a complete no-op. This implements just the actual
+# capability asked for -- "show evidence of whether a Dependabot PR's specific
+# check (e.g. a terraform plan) passed, so a human can trust it or not" --
+# using dependabot/fetch-metadata + fountainhead/action-wait-for-check +
+# a sticky PR comment, no GHAS dependency required.
+name: 🤖 dependabot-automerge
+run-name: 🤖 Report Dependabot PR evidence for ${{ inputs.wait-for-check-name }}
+
+on:
+  workflow_call:
+    inputs:
+      github-actions-runner:
+        description: "Runner to use for every job in this workflow"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+      wait-for-check-name:
+        description: >-
+          Exact name of the check this workflow waits for and reports on
+          (e.g. "terraform / 📝️ plan" -- must match the real check name,
+          shaped <calling-job-id> / <nested-job-name> for a reusable-workflow
+          caller; see terraform-devsecops-workflow.yaml's own check names).
+        required: true
+        type: string
+
+      wait-timeout-seconds:
+        description: "How long to wait for that check before giving up"
+        required: false
+        type: number
+        default: 600
+
+      allowed-semver-types:
+        description: >-
+          Comma-separated Dependabot update types this reports as
+          "in policy": semver-patch, semver-minor, semver-major. This is
+          informational only in v1 (no auto-merge yet) -- it changes the
+          comment's language, not whether anything gets merged.
+        required: false
+        type: string
+        default: "semver-patch,semver-minor"
+
+jobs:
+  validate-inputs:
+    name: 🔍 validate-inputs
+    runs-on: ${{ inputs.github-actions-runner }}
+    steps:
+      - name: Check this is actually a Dependabot PR
+        if: ${{ github.actor != 'dependabot[bot]' }}
+        run: |
+          echo "::error::This workflow is for Dependabot PRs only (github.actor was '${{ github.actor }}', not 'dependabot[bot]'). Don't call it from a general PR trigger."
+          exit 1
+
+      - name: Check wait-for-check-name is not empty
+        if: ${{ inputs.wait-for-check-name == '' }}
+        run: |
+          echo "::error::wait-for-check-name is required -- there is no safe default for which check to report on."
+          exit 1
+
+  evidence-report:
+    name: 📋 evidence-report
+    needs: [validate-inputs]
+    runs-on: ${{ inputs.github-actions-runner }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: "${{ github.token }}"
+
+      - name: Wait for the reported check to complete
+        id: wait
+        uses: fountainhead/action-wait-for-check@5a908a24814494009c4bb27c242ea38c93c593be # v1.2.0
+        with:
+          token: ${{ github.token }}
+          checkName: ${{ inputs.wait-for-check-name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          timeoutSeconds: ${{ inputs.wait-timeout-seconds }}
+
+      - name: Compose evidence comment
+        id: report
+        shell: bash
+        env:
+          DEP_NAME: ${{ steps.metadata.outputs.dependency-names }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          ALLOWED: ${{ inputs.allowed-semver-types }}
+          CHECK_NAME: ${{ inputs.wait-for-check-name }}
+          CHECK_CONCLUSION: ${{ steps.wait.outputs.conclusion }}
+        run: |
+          set -euo pipefail
+          if [[ ",${ALLOWED}," == *",${UPDATE_TYPE},"* ]]; then
+            POLICY="✅ in policy (${ALLOWED})"
+          else
+            POLICY="⚠️ outside policy (${ALLOWED}) -- human judgement needed regardless of the check result"
+          fi
+
+          if [ "$CHECK_CONCLUSION" = "success" ]; then
+            VERDICT="✅ \`$CHECK_NAME\` passed -- no evidence this update breaks anything"
+          else
+            VERDICT="❌ \`$CHECK_NAME\` concluded \`$CHECK_CONCLUSION\`, not \`success\` -- do not merge without investigating"
+          fi
+
+          {
+            echo "## 🤖 Dependabot PR evidence report"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Dependency | \`$DEP_NAME\` |"
+            echo "| Update type | \`$UPDATE_TYPE\` |"
+            echo "| Semver policy | $POLICY |"
+            echo "| Reported check | \`$CHECK_NAME\` |"
+            echo "| Check result | $VERDICT |"
+            echo ""
+            echo "_This is evidence only -- approving and merging is still a human decision._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "## 🤖 Dependabot PR evidence report"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Dependency | \`$DEP_NAME\` |"
+            echo "| Update type | \`$UPDATE_TYPE\` |"
+            echo "| Semver policy | $POLICY |"
+            echo "| Reported check | \`$CHECK_NAME\` |"
+            echo "| Check result | $VERDICT |"
+            echo ""
+            echo "_This is evidence only -- approving and merging is still a human decision._"
+          } > /tmp/dependabot-evidence.md
+
+      - name: Post evidence as a sticky PR comment
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2
+        with:
+          recreate: true
+          path: /tmp/dependabot-evidence.md
+
+      - name: Fail if the reported check did not succeed
+        if: ${{ steps.wait.outputs.conclusion != 'success' }}
+        run: |
+          echo "::error::'${{ inputs.wait-for-check-name }}' concluded '${{ steps.wait.outputs.conclusion }}', not 'success' -- failing this workflow so the PR shows a red check, not just an easy-to-miss comment."
+          exit 1
