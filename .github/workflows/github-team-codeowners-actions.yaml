@@ -1,0 +1,213 @@
+# 🎭 Reusable CODEOWNERS validation — YAML lint on .github/workflows, a full
+# syntax/duplicate-pattern/file check via mszostok/codeowners-validator, and
+# a job that resolves every @team/@user referenced in CODEOWNERS against the
+# real GitHub org, publishing a step-summary + sticky PR comment with
+# existence + links.
+#
+# Reviewed copy of Viasat/vionix's .github/workflows/github-team-codeowners-actions.yaml.
+# Unlike terraform-devsecops-workflow.yaml, this one had no Viasat-internal
+# dependencies to strip — only public actions and a self-contained bash
+# script. The only change: github-actions-runner now defaults to
+# ubuntu-latest (matching this repo's other reusable workflows) instead of
+# the Viasat-internal `vionix` self-hosted label.
+name: 🎭 github-team-codeowners-actions
+run-name: 🎭 Validate CODEOWNERS teams/users and YAML lint
+
+on:
+  workflow_call:
+    inputs:
+      github-actions-runner:
+        description: "Runner to use for every job in this workflow"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+      yaml-lint-dir:
+        description: "Directory to yaml-lint"
+        required: false
+        type: string
+        default: .github/workflows
+
+      codeowners-file:
+        description: "Path to the CODEOWNERS file to inspect for team/user ownership"
+        required: false
+        type: string
+        default: .github/CODEOWNERS
+
+      fail-on-missing-team:
+        description: "Fail the check when a CODEOWNERS team/user does not exist in the org"
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      org-read-token:
+        description: >-
+          Optional token with org read (read:org) used to verify CODEOWNERS teams
+          exist. Falls back to the job's GITHUB_TOKEN, which may lack cross-org team
+          read — unresolved teams then show as "could not verify" rather than failing.
+        required: false
+
+jobs:
+  yaml-check:
+    name: 📑 yaml-check
+    runs-on: ${{ inputs.github-actions-runner }}
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      YAML_LINT_CONFIG: |
+        extends: default
+        rules:
+          line-length: disable
+          document-start: disable
+          empty-lines:
+            level: warning
+          new-line-at-end-of-file:
+            level: warning
+          trailing-spaces:
+            level: warning
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set Yamllint configuration
+        run: |
+          echo "${{ env.YAML_LINT_CONFIG }}" > .yamllint
+
+      - name: YAML Lint
+        uses: karancode/yamllint-github-action@4052d365f09b8d34eb552c363d1141fd60e2aeb2 # v3.0.0
+        env:
+          GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          yamllint_config_filepath: .yamllint
+          yamllint_strict: false
+          yamllint_file_or_dir: ${{ inputs.yaml-lint-dir }}
+          yamllint_comment: true
+          yamllint_format: colored
+          allow_multiple_documents: true
+
+  codeowners-check:
+    name: 🔧 codeowners-check
+    runs-on: ${{ inputs.github-actions-runner }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: "Full check of CODEOWNERS"
+        uses: mszostok/codeowners-validator@7f3f5e28c6d7b8dfae5731e54ce2272ca384592f # v0.7.4
+        with:
+          # "files" check allows CODEOWNERS to specify not-yet-existent paths.
+          checks: "files,duppatterns,syntax"
+          github_base_url: ${{ github.api_url }}
+
+      - name: "Syntax check of CODEOWNERS"
+        uses: mszostok/codeowners-validator@7f3f5e28c6d7b8dfae5731e54ce2272ca384592f # v0.7.4
+        with:
+          checks: "syntax,duppatterns"
+
+  # Resolves every @team / @user referenced in CODEOWNERS against the GitHub org,
+  # publishes a Summary (step summary + sticky PR comment) with existence + links.
+  codeowners-teams:
+    name: 👥 codeowners-teams
+    runs-on: ${{ inputs.github-actions-runner }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Validate & summarize CODEOWNERS teams and users
+        shell: bash
+        env:
+          CODEOWNERS_FILE: ${{ inputs.codeowners-file }}
+          FAIL_ON_MISSING: ${{ inputs.fail-on-missing-team }}
+          GH_API: ${{ github.api_url }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EVENT: ${{ github.event_name }}
+          ORG_TOKEN: ${{ secrets.org-read-token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          TOKEN="${ORG_TOKEN:-$GH_TOKEN}"
+          OUT=/tmp/codeowners-teams.md
+          { echo "## 👥 CODEOWNERS teams & users"; echo ""; } > "$OUT"
+
+          # locate the CODEOWNERS file
+          F=""
+          for c in "$CODEOWNERS_FILE" .github/CODEOWNERS CODEOWNERS docs/CODEOWNERS; do
+            [ -n "$c" ] && [ -f "$c" ] && { F="$c"; break; }
+          done
+          if [ -z "$F" ]; then
+            echo "_No CODEOWNERS file found._" >> "$OUT"
+            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          echo "Source: \`$F\`" >> "$OUT"; echo "" >> "$OUT"
+
+          # owners = tokens starting with @ (excludes email owners like user@domain)
+          owners=$(sed 's/#.*//' "$F" | tr ' \t' '\n' | grep -E '^@[A-Za-z0-9]' | sort -u || true)
+          if [ -z "$owners" ]; then
+            echo "_No @team/@user owners referenced._" >> "$OUT"
+            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+
+          { echo "| Owner | Type | Status | Link |"; echo "|-------|------|--------|------|"; } >> "$OUT"
+          missing=0; unver=0; total=0
+          while IFS= read -r o; do
+            [ -z "$o" ] && continue
+            total=$((total+1)); name="${o#@}"
+            if printf '%s' "$name" | grep -q '/'; then
+              org="${name%%/*}"; slug="${name#*/}"; link="$SERVER/orgs/$org/teams/$slug"
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" "$GH_API/orgs/$org/teams/$slug")
+              case "$code" in
+                200) st="✅ exists"; lk="[$org/$slug]($link)";;
+                404) st="❌ missing"; lk="—"; missing=$((missing+1));;
+                401|403) st="⚠️ could not verify (token lacks org read)"; lk="[$org/$slug]($link)"; unver=$((unver+1));;
+                *) st="⚠️ http $code"; lk="—"; unver=$((unver+1));;
+              esac
+              echo "| \`@$name\` | team | $st | $lk |" >> "$OUT"
+            else
+              link="$SERVER/$name"
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" "$GH_API/users/$name")
+              case "$code" in
+                200) st="✅ exists"; lk="[@$name]($link)";;
+                404) st="❌ missing"; lk="—"; missing=$((missing+1));;
+                *) st="⚠️ http $code"; lk="—"; unver=$((unver+1));;
+              esac
+              echo "| \`@$name\` | user | $st | $lk |" >> "$OUT"
+            fi
+          done <<< "$owners"
+          present=$((total-missing-unver))
+          { echo ""; echo "**Summary:** $total owners · ✅ $present present · ❌ $missing missing · ⚠️ $unver unverified"; } >> "$OUT"
+
+          cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+
+          # sticky PR comment (upsert by marker) — pull_request events only
+          if [ "$EVENT" = "pull_request" ] && [ -n "${PR:-}" ]; then
+            marker='<!-- codeowners-teams -->'
+            body="$marker"$'\n'"$(cat "$OUT")"
+            jqbody=$(jq -Rs . <<< "$body")
+            cid=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GH_API/repos/$REPO/issues/$PR/comments?per_page=100" \
+              | jq -r --arg m "$marker" 'map(select(.body|contains($m)))[0].id // empty')
+            if [ -n "$cid" ]; then
+              curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" "$GH_API/repos/$REPO/issues/comments/$cid" -d "{\"body\":$jqbody}"
+            else
+              curl -s -o /dev/null -X POST -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" "$GH_API/repos/$REPO/issues/$PR/comments" -d "{\"body\":$jqbody}"
+            fi
+          fi
+
+          if [ "$FAIL_ON_MISSING" = "true" ] && [ "$missing" -gt 0 ]; then
+            echo "::error ::$missing CODEOWNERS owner(s) do not exist in the org"; exit 1
+          fi
+          exit 0
