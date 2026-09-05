@@ -10,6 +10,7 @@ Each reusable workflow has its own usage doc under `products/`:
 
 - [`products/devsecops-docker/`](products/devsecops-docker/README.md) — `docker-multiarch-cicd.yaml`
 - [`products/devsecops-terraform/`](products/devsecops-terraform/README.md) — `terraform-devsecops-workflow.yaml`
+- [`products/devsecops-github/`](products/devsecops-github/README.md) — GitHub repo-hygiene workflows (multiple capabilities, one per file under its own `capabilities/`), e.g. `github-team-codeowners-actions.yaml`
 
 ## Reusable workflow: `docker-multiarch-cicd`
 
