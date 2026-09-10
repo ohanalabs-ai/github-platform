@@ -16,7 +16,7 @@ on:
 
 jobs:
   docker-multiarch:
-    uses: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
     with:
       registry: ghcr.io
       target-service: gha-fix
