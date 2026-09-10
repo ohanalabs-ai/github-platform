@@ -139,6 +139,62 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
+      - name: Sanitize compose file for build (strip env_file, seed empty .env)
+        id: sanitize_compose_env_file
+        shell: bash
+        env:
+          FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
+        run: |
+          set -euo pipefail
+          FILE="${{ env.DOCKER_COMPOSE_FILE_NAME }}"
+          echo "Sanitizing $FILE before build: env_file only affects 'docker compose up' runtime, not image builds, and CI never has a real .env checked out."
+
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet --user pyyaml
+
+          python3 - <<'PY'
+          import os
+          import sys
+
+          path = os.environ.get("FILE", os.environ.get("DOCKER_COMPOSE_FILE_NAME", "docker-compose.yaml"))
+
+          try:
+              import yaml
+          except ImportError:
+              print("::error::python3 'yaml' module (PyYAML) is required but not available on this runner.")
+              sys.exit(1)
+
+          with open(path, "r", encoding="utf-8") as f:
+              compose = yaml.safe_load(f) or {}
+
+          services = compose.get("services") or {}
+          affected = sorted(
+              name for name, cfg in services.items()
+              if isinstance(cfg, dict) and "env_file" in cfg
+          )
+
+          if affected:
+              for name in affected:
+                  del services[name]["env_file"]
+              with open(path, "w", encoding="utf-8") as f:
+                  yaml.safe_dump(compose, f, sort_keys=False)
+              names = ", ".join(affected)
+              print(
+                  f"::warning::Removed 'env_file' from service(s) [{names}] in {path} before build. "
+                  "env_file references a local .env that doesn't exist in CI; it only affects "
+                  "'docker compose up' runtime, not image builds, so it is stripped before docker "
+                  "buildx bake/build reads this compose file."
+              )
+          else:
+              print(f"No 'env_file' entries found in {path}; nothing to strip.")
+          PY
+
+          # Defensive safety net regardless of whether env_file was found above: some part
+          # of the build pipeline (or a future compose feature) may still implicitly stat
+          # a .env file. Always ensure an empty one exists so nothing breaks on it being
+          # missing. This is intentionally unconditional and idempotent.
+          : > .env
+          echo "Ensured an empty .env exists at $(pwd)/.env as a build-time safety net."
+
       - name: Loads docker compose properties
         id: compose-metadata
         uses: ohanalabs-ai/actions/docker/compose/metadata@main
@@ -451,6 +507,62 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
 
+      - name: Sanitize compose file for build (strip env_file, seed empty .env)
+        id: sanitize_compose_env_file
+        shell: bash
+        env:
+          FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
+        run: |
+          set -euo pipefail
+          FILE="${{ env.DOCKER_COMPOSE_FILE_NAME }}"
+          echo "Sanitizing $FILE before build: env_file only affects 'docker compose up' runtime, not image builds, and CI never has a real .env checked out."
+
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet --user pyyaml
+
+          python3 - <<'PY'
+          import os
+          import sys
+
+          path = os.environ.get("FILE", os.environ.get("DOCKER_COMPOSE_FILE_NAME", "docker-compose.yaml"))
+
+          try:
+              import yaml
+          except ImportError:
+              print("::error::python3 'yaml' module (PyYAML) is required but not available on this runner.")
+              sys.exit(1)
+
+          with open(path, "r", encoding="utf-8") as f:
+              compose = yaml.safe_load(f) or {}
+
+          services = compose.get("services") or {}
+          affected = sorted(
+              name for name, cfg in services.items()
+              if isinstance(cfg, dict) and "env_file" in cfg
+          )
+
+          if affected:
+              for name in affected:
+                  del services[name]["env_file"]
+              with open(path, "w", encoding="utf-8") as f:
+                  yaml.safe_dump(compose, f, sort_keys=False)
+              names = ", ".join(affected)
+              print(
+                  f"::warning::Removed 'env_file' from service(s) [{names}] in {path} before build. "
+                  "env_file references a local .env that doesn't exist in CI; it only affects "
+                  "'docker compose up' runtime, not image builds, so it is stripped before docker "
+                  "buildx bake/build reads this compose file."
+              )
+          else:
+              print(f"No 'env_file' entries found in {path}; nothing to strip.")
+          PY
+
+          # Defensive safety net regardless of whether env_file was found above: some part
+          # of the build pipeline (or a future compose feature) may still implicitly stat
+          # a .env file. Always ensure an empty one exists so nothing breaks on it being
+          # missing. This is intentionally unconditional and idempotent.
+          : > .env
+          echo "Ensured an empty .env exists at $(pwd)/.env as a build-time safety net."
+
       - name: Consolidate build vars
         id: build_vars
         shell: bash
@@ -585,6 +697,62 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Sanitize compose file for build (strip env_file, seed empty .env)
+        id: sanitize_compose_env_file
+        shell: bash
+        env:
+          FILE: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
+        run: |
+          set -euo pipefail
+          FILE="${{ env.DOCKER_COMPOSE_FILE_NAME }}"
+          echo "Sanitizing $FILE before build: env_file only affects 'docker compose up' runtime, not image builds, and CI never has a real .env checked out."
+
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet --user pyyaml
+
+          python3 - <<'PY'
+          import os
+          import sys
+
+          path = os.environ.get("FILE", os.environ.get("DOCKER_COMPOSE_FILE_NAME", "docker-compose.yaml"))
+
+          try:
+              import yaml
+          except ImportError:
+              print("::error::python3 'yaml' module (PyYAML) is required but not available on this runner.")
+              sys.exit(1)
+
+          with open(path, "r", encoding="utf-8") as f:
+              compose = yaml.safe_load(f) or {}
+
+          services = compose.get("services") or {}
+          affected = sorted(
+              name for name, cfg in services.items()
+              if isinstance(cfg, dict) and "env_file" in cfg
+          )
+
+          if affected:
+              for name in affected:
+                  del services[name]["env_file"]
+              with open(path, "w", encoding="utf-8") as f:
+                  yaml.safe_dump(compose, f, sort_keys=False)
+              names = ", ".join(affected)
+              print(
+                  f"::warning::Removed 'env_file' from service(s) [{names}] in {path} before build. "
+                  "env_file references a local .env that doesn't exist in CI; it only affects "
+                  "'docker compose up' runtime, not image builds, so it is stripped before docker "
+                  "buildx bake/build reads this compose file."
+              )
+          else:
+              print(f"No 'env_file' entries found in {path}; nothing to strip.")
+          PY
+
+          # Defensive safety net regardless of whether env_file was found above: some part
+          # of the build pipeline (or a future compose feature) may still implicitly stat
+          # a .env file. Always ensure an empty one exists so nothing breaks on it being
+          # missing. This is intentionally unconditional and idempotent.
+          : > .env
+          echo "Ensured an empty .env exists at $(pwd)/.env as a build-time safety net."
 
       - name: Compute vars
         id: vars
