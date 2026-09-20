@@ -1,4 +1,18 @@
 # Reusable workflow for the docker multi-architect CICD
+#
+# Build provenance (see the attestation-mode input + ATTEST_MODE env below):
+#   * PUBLIC caller repos  -> GitHub Artifact Attestations (actions/attest-build-provenance,
+#     pushed to the registry; consumers verify with `gh attestation verify`).
+#   * PRIVATE caller repos -> cosign keyless (Sigstore): `cosign sign` + `cosign attest
+#     --type slsaprovenance1` with this workflow's OIDC identity; consumers verify with
+#     `cosign verify --certificate-identity-regexp '^https://github.com/<signer-workflow>@'
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com`.
+#     Why: GitHub Artifact Attestations on private repositories exist only on GitHub
+#     Enterprise Cloud — there is NO org-level toggle to enable; a private repo just gets
+#     HTTP 404 from the attestations API (ohanalabs-ai/vault-mcp-server run 35250882375),
+#     while the same pipeline passes on a public repo (marcellodesales/mcp-brasil run
+#     35491108003). The 🛡️ slsa job therefore verifies whichever mechanism applied and
+#     never 404s by design.
 on:
   workflow_call:
     inputs:
@@ -59,10 +73,25 @@ on:
         type: string
         default: ${{ github.repository_owner }}
       push-attestations:
-        description: Enable/disable pushing attestations to the registry.
+        description: >-
+          Force GitHub-native attestations (actions/attest-build-provenance +
+          push to the registry). Only works where GitHub Artifact Attestations
+          are available (public repos; private repos need GitHub Enterprise
+          Cloud). Prefer attestation-mode; this input is kept as an override.
         required: false
         type: string
         default: "false"
+      attestation-mode:
+        description: >-
+          How the image digest gets verifiable build provenance.
+          auto (default): public repo -> GitHub attestations (gh attestation verify);
+          private repo -> cosign keyless (Sigstore, cosign verify), because GitHub
+          Artifact Attestations for private repos require GitHub Enterprise Cloud.
+          github: force GitHub attestations. cosign: force cosign keyless.
+          none: skip provenance (the slsa job reports "not attested" and does not fail).
+        required: false
+        type: string
+        default: auto
       dockerhub-registry-username:
         description: Optional Docker Hub registry username to publish images.
         required: false
@@ -119,11 +148,19 @@ env:
   DOCKERHUB_REGISTRY: ${{ inputs.dockerhub-registry || 'docker.io' }}
   DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub-namespace || github.repository_owner }}
 
-  # Set to true only if your org/repo has artifact-metadata enabled and you want attestations pushed to the registry
-  # The artifact-metadata APIs (used when pushing attestations to the registry) are only available if your org/account has the Artifact Attestations feature enabled. For personal orgs it's generally not on by default, and there's no self-serve toggle. If you don't have it enabled, GitHub returns 404 and you'll see the storage-record warning.
-  # What to do: Keep PUSH_ATTESTATIONS: "false" (as in the current workflow). You'll still build, push images, and generate SBOMs; you just won't push attestations to GHCR.
-  # If/when you get the feature enabled (GitHub Enterprise Cloud / allowlisted), set PUSH_ATTESTATIONS: "true" to start pushing attestations. No other changes needed.
-  PUSH_ATTESTATIONS: ${{ inputs.push-attestations || 'false' }}
+  # Provenance mechanism, resolved once for every job (see the attestation-mode input).
+  #   github -> actions/attest-build-provenance (+ SBOM) pushed to the registry, verified with
+  #             `gh attestation verify`. Needs GitHub Artifact Attestations: public repos have
+  #             it; PRIVATE repos only get it on GitHub Enterprise Cloud (no org toggle exists —
+  #             a private repo simply gets HTTP 404 from the attestations API).
+  #   cosign -> Sigstore keyless: `cosign sign` + `cosign attest --type slsaprovenance1` on the
+  #             digest with this reusable workflow's OIDC identity; verified with `cosign verify`.
+  #             Works for private repos on any GitHub plan. Chosen automatically for private repos.
+  #   none   -> no provenance; the 🛡️ slsa job reports it and does not fail.
+  # push-attestations "true" is the legacy override that forces `github` regardless of visibility.
+  ATTEST_MODE: ${{ inputs.attestation-mode != '' && inputs.attestation-mode != 'auto' && inputs.attestation-mode || (inputs.push-attestations == 'true' && 'github') || (github.event.repository.visibility == 'private' && 'cosign') || 'github' }}
+  # Derived: GitHub-native attestations are produced (and pushed) only in github mode.
+  PUSH_ATTESTATIONS: ${{ (inputs.attestation-mode == 'github' || (inputs.attestation-mode != 'cosign' && inputs.attestation-mode != 'none' && (inputs.push-attestations == 'true' || github.event.repository.visibility != 'private'))) && 'true' || 'false' }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -337,6 +374,48 @@ jobs:
           sbom-path: sbom-pr.spdx.json
           push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
           show-summary: true
+
+      - name: Install cosign (private repo → Sigstore keyless provenance)
+        if: env.ATTEST_MODE == 'cosign'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Generate SBOM for cosign attestation
+        if: env.ATTEST_MODE == 'cosign'
+        uses: anchore/sbom-action@v0.17.3
+        with:
+          image: ${{ steps.pr_digest.outputs.image_base }}@${{ steps.pr_digest.outputs.digest }}
+          output-file: sbom-pr-cosign.spdx.json
+          upload-artifact: false
+
+      - name: Sign + attest SLSA provenance with cosign (keyless)
+        if: env.ATTEST_MODE == 'cosign'
+        shell: bash
+        env:
+          SUBJECT: ${{ steps.pr_digest.outputs.image_base }}@${{ steps.pr_digest.outputs.digest }}
+          SBOM_FILE: sbom-pr-cosign.spdx.json
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # SLSA v1 provenance predicate: builder = this reusable workflow's OIDC identity
+          # (job_workflow_ref), source = the caller repo at the built commit.
+          jq -n \
+            --arg buildType "https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml" \
+            --arg repo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --arg ref "${GITHUB_REF}" --arg sha "${GITHUB_SHA}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg builderId "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --arg invocation "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
+            --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{buildDefinition:{buildType:$buildType,externalParameters:{repository:$repo,ref:$ref,workflow:$workflowRef},internalParameters:{event:env.GITHUB_EVENT_NAME,runId:env.GITHUB_RUN_ID,runAttempt:env.GITHUB_RUN_ATTEMPT},resolvedDependencies:[{uri:("git+"+$repo+"@"+$ref),digest:{gitCommit:$sha}}]},runDetails:{builder:{id:$builderId},metadata:{invocationId:$invocation,startedOn:$started}}}' \
+            > "${RUNNER_TEMP}/slsa-provenance.json"
+          cosign sign --recursive "${SUBJECT}"
+          cosign attest --recursive --type slsaprovenance1 --predicate "${RUNNER_TEMP}/slsa-provenance.json" "${SUBJECT}"
+          cosign attest --recursive --type spdxjson --predicate "${SBOM_FILE}" "${SUBJECT}"
+          {
+            echo "### 🔏 cosign keyless provenance"
+            echo ""
+            echo "Signed + attested (slsaprovenance1, spdxjson) \`${SUBJECT}\` with the OIDC identity of \`${GITHUB_WORKFLOW_REF}\` (Sigstore public good: Fulcio + Rekor)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summarize build metadata (PR)
         shell: bash
@@ -636,6 +715,48 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-ref.spdx.json
 
+      - name: Install cosign (private repo → Sigstore keyless provenance)
+        if: env.ATTEST_MODE == 'cosign'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Generate SBOM for cosign attestation
+        if: env.ATTEST_MODE == 'cosign'
+        uses: anchore/sbom-action@v0.17.3
+        with:
+          image: ${{ steps.ref_build.outputs.image-base }}@${{ steps.ref_build.outputs.digest }}
+          output-file: sbom-ref-cosign.spdx.json
+          upload-artifact: false
+
+      - name: Sign + attest SLSA provenance with cosign (keyless)
+        if: env.ATTEST_MODE == 'cosign'
+        shell: bash
+        env:
+          SUBJECT: ${{ steps.ref_build.outputs.subject }}
+          SBOM_FILE: sbom-ref-cosign.spdx.json
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # SLSA v1 provenance predicate: builder = this reusable workflow's OIDC identity
+          # (job_workflow_ref), source = the caller repo at the built commit.
+          jq -n \
+            --arg buildType "https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml" \
+            --arg repo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --arg ref "${GITHUB_REF}" --arg sha "${GITHUB_SHA}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg builderId "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --arg invocation "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
+            --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{buildDefinition:{buildType:$buildType,externalParameters:{repository:$repo,ref:$ref,workflow:$workflowRef},internalParameters:{event:env.GITHUB_EVENT_NAME,runId:env.GITHUB_RUN_ID,runAttempt:env.GITHUB_RUN_ATTEMPT},resolvedDependencies:[{uri:("git+"+$repo+"@"+$ref),digest:{gitCommit:$sha}}]},runDetails:{builder:{id:$builderId},metadata:{invocationId:$invocation,startedOn:$started}}}' \
+            > "${RUNNER_TEMP}/slsa-provenance.json"
+          cosign sign --recursive "${SUBJECT}"
+          cosign attest --recursive --type slsaprovenance1 --predicate "${RUNNER_TEMP}/slsa-provenance.json" "${SUBJECT}"
+          cosign attest --recursive --type spdxjson --predicate "${SBOM_FILE}" "${SUBJECT}"
+          {
+            echo "### 🔏 cosign keyless provenance"
+            echo ""
+            echo "Signed + attested (slsaprovenance1, spdxjson) \`${SUBJECT}\` with the OIDC identity of \`${GITHUB_WORKFLOW_REF}\` (Sigstore public good: Fulcio + Rekor)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Comment PR with build metadata
         if: ${{ steps.build_vars.outputs.comment_enabled == 'true' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
@@ -787,6 +908,48 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-tag.spdx.json
           push-latest: true
+
+      - name: Install cosign (private repo → Sigstore keyless provenance)
+        if: env.ATTEST_MODE == 'cosign'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Generate SBOM for cosign attestation
+        if: env.ATTEST_MODE == 'cosign'
+        uses: anchore/sbom-action@v0.17.3
+        with:
+          image: ${{ steps.release_ref_build.outputs.image-base }}@${{ steps.release_ref_build.outputs.digest }}
+          output-file: sbom-tag-cosign.spdx.json
+          upload-artifact: false
+
+      - name: Sign + attest SLSA provenance with cosign (keyless)
+        if: env.ATTEST_MODE == 'cosign'
+        shell: bash
+        env:
+          SUBJECT: ${{ steps.release_ref_build.outputs.subject }}
+          SBOM_FILE: sbom-tag-cosign.spdx.json
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # SLSA v1 provenance predicate: builder = this reusable workflow's OIDC identity
+          # (job_workflow_ref), source = the caller repo at the built commit.
+          jq -n \
+            --arg buildType "https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml" \
+            --arg repo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --arg ref "${GITHUB_REF}" --arg sha "${GITHUB_SHA}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg builderId "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --arg invocation "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
+            --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{buildDefinition:{buildType:$buildType,externalParameters:{repository:$repo,ref:$ref,workflow:$workflowRef},internalParameters:{event:env.GITHUB_EVENT_NAME,runId:env.GITHUB_RUN_ID,runAttempt:env.GITHUB_RUN_ATTEMPT},resolvedDependencies:[{uri:("git+"+$repo+"@"+$ref),digest:{gitCommit:$sha}}]},runDetails:{builder:{id:$builderId},metadata:{invocationId:$invocation,startedOn:$started}}}' \
+            > "${RUNNER_TEMP}/slsa-provenance.json"
+          cosign sign --recursive "${SUBJECT}"
+          cosign attest --recursive --type slsaprovenance1 --predicate "${RUNNER_TEMP}/slsa-provenance.json" "${SUBJECT}"
+          cosign attest --recursive --type spdxjson --predicate "${SBOM_FILE}" "${SUBJECT}"
+          {
+            echo "### 🔏 cosign keyless provenance"
+            echo ""
+            echo "Signed + attested (slsaprovenance1, spdxjson) \`${SUBJECT}\` with the OIDC identity of \`${GITHUB_WORKFLOW_REF}\` (Sigstore public good: Fulcio + Rekor)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Docker Hub creds (optional)
         id: dh_creds
@@ -1066,6 +1229,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      # One verifier for every mechanism (ohanalabs-ai/actions PR #3):
+      #   github -> gh attestation verify;  cosign -> cosign verify (+ verify-attestation);
+      #   auto   -> GitHub first, cosign fallback. attestations-pushed tells it whether a
+      #   missing GitHub attestation is informational (❕) or a failure (❌).
       - name: Verify SLSA provenance
         id: report
         uses: ohanalabs-ai/actions/docker/slsa-report@main
@@ -1077,7 +1244,10 @@ jobs:
           slsa-build-level: ${{ inputs.slsa-build-level }}
           ref-name: ${{ steps.report_vars.outputs.ref_name }}
           title: ${{ steps.report_vars.outputs.title }}
-          fail-on-unverified: ${{ env.PUSH_ATTESTATIONS }}
+          mechanism: ${{ env.ATTEST_MODE == 'none' && 'github' || env.ATTEST_MODE }}
+          attestations-pushed: ${{ env.PUSH_ATTESTATIONS }}
+          cosign-identity-regexp: ${{ env.ATTEST_MODE != 'github' && format('^https://github.com/{0}@', inputs.slsa-signer-workflow) || '' }}
+          fail-on-unverified: "true"
 
       - name: Summarize verification result
         shell: bash
@@ -1085,6 +1255,8 @@ jobs:
           BUILD_TYPE: ${{ steps.report_vars.outputs.build_type }}
           REF_NAME: ${{ steps.report_vars.outputs.ref_name }}
           SUBJECT: ${{ steps.report_vars.outputs.subject }}
+          MODE: ${{ steps.report.outputs.attested_by }}
+          STATUS: ${{ steps.report.outputs.status }}
           VERIFIED: ${{ steps.report.outputs.verified }}
           DECLARED_SLSA_BUILD_LEVEL: ${{ steps.report.outputs.declared_slsa_build_level }}
           REPORT: ${{ steps.report.outputs.summary_markdown }}
@@ -1102,6 +1274,7 @@ jobs:
             echo "|---|---|"
             echo "| Build type | \`${BUILD_TYPE}\` |"
             echo "| Ref | \`${REF_NAME}\` |"
+            echo "| Attested by | \`${MODE}\` (${STATUS}) |"
             echo "| Verified | \`${VERIFIED}\` |"
             echo "| Subject | \`${SUBJECT}\` |"
             echo "| Workflow run | [View workflow run](${WORKFLOW_RUN_URL}) |"
@@ -1124,6 +1297,8 @@ jobs:
           IMAGE_TAG: ${{ needs['ref-build'].outputs.image_tag }}
           IMAGE_SUFFIX: ${{ needs['ref-build'].outputs.image_suffix }}
           VERIFIED: ${{ steps.report.outputs.verified }}
+          ATTESTED_BY: ${{ steps.report.outputs.attested_by }}
+          STATUS: ${{ steps.report.outputs.status }}
           SLSA_REPORT: ${{ steps.report.outputs.summary_markdown }}
         with:
           script: |
@@ -1159,7 +1334,7 @@ jobs:
               `| Image | [${image}](${packageUrl}) |`,
               `| Digest | \`${process.env.DIGEST}\` |`,
               `| Subject | \`${process.env.SUBJECT}\` |`,
-              `| SLSA verified | ${process.env.VERIFIED === 'true' ? '✅ Yes' : '❌ No'} |`,
+              `| Provenance | ${process.env.VERIFIED === 'true' ? '✅ verified (' + process.env.ATTESTED_BY + ')' : (process.env.STATUS === 'not-attested' ? '❕ not attested (informational)' : '❌ verification failed')} |`,
               `| Workflow run | [View verification run](${workflowRunUrl}) |`,
               '',
               '**Tags**',
