@@ -73,6 +73,11 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `run-destroy` | `false` | Explicit opt-in to run the `destroy` job at all. Same shape and reasoning as `run-deploy`. Mutually exclusive with `run-deploy` — `validate-inputs` fails fast if both are true |
 | `expected-deploy-events` | `workflow_dispatch` | Comma-separated allowlist of `github.event_name` values `deploy`/`destroy` may run under — a third, independent gate on top of `run-deploy`/`run-destroy`. To deploy on merge to `main`, use a `push` (`branches: [main]`) trigger and include `push` here — **not** `pull_request`, whose `github.ref` never resolves to `refs/heads/main` and so can never satisfy a GitHub Environment's branch-restriction policy |
 | `agent-validated` | `false` | Skip the target Environment's required-reviewer pause, for a caller (e.g. an agent) that already validated the plan itself. Mechanism: `deploy`/`destroy` reference the Environment `<terraform-environment-name>-unattended` instead of `<terraform-environment-name>` — same job, a different (by default unprotected) Environment name, not a duplicated job. Restricting *who* may set this true is the calling repo's own responsibility |
+| `vault-addr` | `""` | HashiCorp Vault address. When set, `plan`/`deploy`/`destroy` first log in to Vault with the job's GitHub OIDC token (`hashicorp/vault-action`, method `jwt`) and export the records in `vault-secrets` as masked env vars — the Vault-native alternative to mirroring secret values into GitHub via `extra-env-json`. Empty = no Vault |
+| `vault-jwt-path` | `github-jwt` | Mount path of Vault's JWT auth method bound to GitHub's OIDC issuer |
+| `vault-role` | `""` | Vault JWT role to log in as; its `bound_claims` (repo, ref) decide who may use it. Required when `vault-addr` is set |
+| `vault-jwt-audience` | `""` | `aud` requested for the OIDC token — must match the role's `bound_audiences` (e.g. `https://github.com/<org>`). Empty = vault-action's default |
+| `vault-secrets` | `""` | `hashicorp/vault-action` `secrets:` spec, one `<path> <key> \| <ENV_VAR>` per line. A `TF_VAR_<name>` target feeds a `sensitive` Terraform variable directly |
 
 ## Secrets
 
@@ -88,6 +93,28 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
           "TAILSCALE_OAUTH_CLIENT_SECRET": "${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}"
         }
 ```
+
+### Secrets from Vault instead of GitHub (recommended when you run Vault)
+
+`extra-env-json` copies secret *values* into the caller's GitHub secrets — a second
+store to rotate. With `vault-addr` set, the terraform jobs log in to Vault with their
+own GitHub OIDC token and pull the records themselves; nothing is mirrored:
+
+```yaml
+    with:
+      vault-addr: https://vault.example.com
+      vault-role: ${{ github.event_name == 'pull_request' && 'gha-<repo>-pr' || format('gha-<repo>-{0}', github.ref_name) }}
+      vault-jwt-audience: https://github.com/<org>
+      vault-secrets: |
+        kv/data/platform/services/api.cloudflare.com/dns api-token | TF_VAR_cloudflare_api_token
+```
+
+Requirements on the Vault side: a JWT auth mount (`vault-jwt-path`) bound to
+`https://token.actions.githubusercontent.com`, a role per repo/ref whose
+`bound_claims` pin `repository` (and `ref`/`pull_request` as you see fit), and a
+policy granting `read` on exactly the records listed. The `plan` job also logs in
+(a PR plan evaluates data sources/variables), so the PR role needs the same read.
+Job-level `id-token: write` is already declared on every terraform job.
 
 ## Jobs
 
