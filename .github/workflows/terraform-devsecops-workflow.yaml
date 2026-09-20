@@ -30,6 +30,14 @@
 #   - Declared `SLACK_CHANNEL_AUTOMATION_ID`/`_TOKEN` secrets existed in the
 #     original but were never referenced by any step in its body — dropped
 #     as dead declarations rather than carried forward unused.
+#   - Added `vault-addr`/`vault-role`/`vault-secrets` (+ `vault-jwt-path`,
+#     `vault-jwt-audience`): optional Vault login with the job's GitHub OIDC
+#     token (hashicorp/vault-action, method jwt) that exports records as
+#     masked env vars before terraform runs — so a caller whose secrets live
+#     in Vault never has to mirror their VALUES into GitHub secrets
+#     (`extra-env-json` stays for callers without Vault). A `uses:` reusable
+#     workflow cannot receive a secret from a sibling job (GitHub drops job
+#     outputs that contain masked values), so the login has to happen here.
 #   - Added `run-deploy` (default false): the original's `deploy` job (like
 #     this one) has no `if:` gate of its own — it relies entirely on the
 #     target GitHub Environment's own protection rules to pause `apply`.
@@ -194,6 +202,46 @@ on:
         type: boolean
         default: false
 
+      vault-addr:
+        description: >-
+          HashiCorp Vault address (e.g. https://vault.example.com). When set,
+          every job that runs terraform (plan/deploy/destroy) first logs in to
+          Vault with the job's GitHub OIDC token (hashicorp/vault-action,
+          method jwt) and exports the records listed in `vault-secrets` as
+          masked env vars — the Vault-native alternative to mirroring secret
+          VALUES into GitHub (`extra-env-json`). Empty = skip Vault entirely.
+        required: false
+        type: string
+        default: ""
+
+      vault-jwt-path:
+        description: "Mount path of Vault's JWT auth method bound to GitHub's OIDC issuer"
+        required: false
+        type: string
+        default: github-jwt
+
+      vault-role:
+        description: "Vault JWT role to log in as (its bound_claims decide which repo/ref may use it). Required when vault-addr is set."
+        required: false
+        type: string
+        default: ""
+
+      vault-jwt-audience:
+        description: "`aud` claim requested for the GitHub OIDC token — must match the role's bound_audiences (e.g. https://github.com/<org>). Empty = vault-action's default (the repo URL)."
+        required: false
+        type: string
+        default: ""
+
+      vault-secrets:
+        description: >-
+          hashicorp/vault-action `secrets:` spec, one `<path> <key> | <ENV_VAR>` per line, e.g.
+          `kv/data/platform/services/api.cloudflare.com/dns api-token | TF_VAR_cloudflare_api_token`.
+          Exported (masked) into the job env before `init`/`plan`/`apply`/`destroy`, so a
+          `TF_VAR_<name>` line feeds a sensitive Terraform variable directly.
+        required: false
+        type: string
+        default: ""
+
     secrets:
       extra-env-json:
         description: >-
@@ -345,6 +393,23 @@ jobs:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
+      - name: Fetch secrets from Vault via GitHub OIDC
+        # Vault-native path for provider credentials / sensitive TF_VARs: the
+        # job's OIDC token → Vault JWT auth (bound to this repo/ref by the role)
+        # → the listed records land in $GITHUB_ENV, masked by vault-action.
+        # Nothing is copied into GitHub secrets; rotation happens in Vault only.
+        # `inputs` (unlike `secrets`) IS allowed in step `if:`.
+        if: ${{ inputs.vault-addr != '' }}
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-addr }}
+          method: jwt
+          path: ${{ inputs.vault-jwt-path }}
+          role: ${{ inputs.vault-role }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportEnv: true
+          secrets: ${{ inputs.vault-secrets }}
+
       - name: Export extra-env-json as masked env vars
         # The `secrets` context is not allowed in step `if:` expressions
         # (confirmed via actionlint — using it there makes the whole
@@ -459,6 +524,23 @@ jobs:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
+      - name: Fetch secrets from Vault via GitHub OIDC
+        # Vault-native path for provider credentials / sensitive TF_VARs: the
+        # job's OIDC token → Vault JWT auth (bound to this repo/ref by the role)
+        # → the listed records land in $GITHUB_ENV, masked by vault-action.
+        # Nothing is copied into GitHub secrets; rotation happens in Vault only.
+        # `inputs` (unlike `secrets`) IS allowed in step `if:`.
+        if: ${{ inputs.vault-addr != '' }}
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-addr }}
+          method: jwt
+          path: ${{ inputs.vault-jwt-path }}
+          role: ${{ inputs.vault-role }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportEnv: true
+          secrets: ${{ inputs.vault-secrets }}
+
       - name: Export extra-env-json as masked env vars
         # The `secrets` context is not allowed in step `if:` expressions
         # (confirmed via actionlint — using it there makes the whole
@@ -531,6 +613,23 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Fetch secrets from Vault via GitHub OIDC
+        # Vault-native path for provider credentials / sensitive TF_VARs: the
+        # job's OIDC token → Vault JWT auth (bound to this repo/ref by the role)
+        # → the listed records land in $GITHUB_ENV, masked by vault-action.
+        # Nothing is copied into GitHub secrets; rotation happens in Vault only.
+        # `inputs` (unlike `secrets`) IS allowed in step `if:`.
+        if: ${{ inputs.vault-addr != '' }}
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-addr }}
+          method: jwt
+          path: ${{ inputs.vault-jwt-path }}
+          role: ${{ inputs.vault-role }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportEnv: true
+          secrets: ${{ inputs.vault-secrets }}
 
       - name: Export extra-env-json as masked env vars
         shell: bash
