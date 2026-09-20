@@ -78,12 +78,16 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `vault-role` | `""` | Vault JWT role to log in as; its `bound_claims` (repo, ref) decide who may use it. Required when `vault-addr` is set |
 | `vault-jwt-audience` | `""` | `aud` requested for the OIDC token — must match the role's `bound_audiences` (e.g. `https://github.com/<org>`). Empty = vault-action's default |
 | `vault-secrets` | `""` | `hashicorp/vault-action` `secrets:` spec, one `<path> <key> \| <ENV_VAR>` per line. A `TF_VAR_<name>` target feeds a `sensitive` Terraform variable directly |
+| `join-tailscale` | `false` | Join the runner to a Tailscale tailnet (`tailscale/github-action`) at the start of `plan`/`deploy`/`destroy`, before the Vault login — for a Vault or backend endpoint reachable only over the tailnet. Needs the `tailscale-oauth-*` secrets |
+| `tailscale-tags` | `tag:ci` | ACL tags for the ephemeral CI node |
+| `tailscale-args` | `--accept-routes` | Extra `tailscale up` flags (accept a subnet router's routes) |
 
 ## Secrets
 
 | Secret | Description |
 |---|---|
 | `extra-env-json` | Optional JSON object of `{ENV_VAR: value}` pairs, exported as masked env vars before `init`/`plan`/`apply`. Use this for any provider beyond AWS that your Terraform config needs credentials for — e.g. a Tailscale provider needing `TAILSCALE_OAUTH_CLIENT_ID`/`_SECRET`. Not required — AWS auth itself goes through OIDC (`id-token: write`), not a static credential. |
+| `tailscale-oauth-client-id` / `tailscale-oauth-secret` | Tailscale OAuth client (scope `auth_keys`, tagged with `tailscale-tags`) used only when `join-tailscale` is `true`. These are trust roots — they stay GitHub secrets (a root cannot be fetched from the Vault it unlocks) |
 
 ```yaml
     secrets:
@@ -108,6 +112,10 @@ own GitHub OIDC token and pull the records themselves; nothing is mirrored:
       vault-secrets: |
         kv/data/platform/services/api.cloudflare.com/dns api-token | TF_VAR_cloudflare_api_token
 ```
+
+If Vault itself is reachable only over the tailnet (an internal load balancer behind a
+subnet router), set `join-tailscale: true` and pass the `tailscale-oauth-*` secrets; the
+join runs before the Vault step in every terraform job.
 
 Requirements on the Vault side: a JWT auth mount (`vault-jwt-path`) bound to
 `https://token.actions.githubusercontent.com`, a role per repo/ref whose
