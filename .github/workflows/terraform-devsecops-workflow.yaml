@@ -38,6 +38,11 @@
 #     (`extra-env-json` stays for callers without Vault). A `uses:` reusable
 #     workflow cannot receive a secret from a sibling job (GitHub drops job
 #     outputs that contain masked values), so the login has to happen here.
+#   - Added `join-tailscale` (+ `tailscale-tags`/`tailscale-args` inputs and the
+#     `tailscale-oauth-client-id`/`tailscale-oauth-secret` secrets): optional
+#     tailnet join at the start of plan/deploy/destroy, before the Vault login,
+#     for callers whose Vault (or backend) sits behind an internal load balancer
+#     reachable only through a Tailscale subnet router.
 #   - Added `run-deploy` (default false): the original's `deploy` job (like
 #     this one) has no `if:` gate of its own — it relies entirely on the
 #     target GitHub Environment's own protection rules to pause `apply`.
@@ -242,6 +247,30 @@ on:
         type: string
         default: ""
 
+      join-tailscale:
+        description: >-
+          Join the runner to a Tailscale tailnet (tailscale/github-action, OAuth
+          client from the `tailscale-oauth-client-id`/`tailscale-oauth-secret`
+          secrets) at the start of plan/deploy/destroy — for a Vault (`vault-addr`)
+          or a Terraform backend/provider endpoint that is reachable only over the
+          tailnet (e.g. an internal load balancer behind a subnet router).
+          Default false: the jobs stay off the tailnet.
+        required: false
+        type: boolean
+        default: false
+
+      tailscale-tags:
+        description: "ACL tags the ephemeral CI node is created with (comma-separated), e.g. tag:ci"
+        required: false
+        type: string
+        default: tag:ci
+
+      tailscale-args:
+        description: "Extra `tailscale up` flags, e.g. --accept-routes to use a subnet router's advertised routes"
+        required: false
+        type: string
+        default: --accept-routes
+
     secrets:
       extra-env-json:
         description: >-
@@ -253,6 +282,12 @@ on:
           provider, and without a way to pass its credentials through,
           terraform plan correctly errored with "Provider credentials
           error" (a real, expected failure, not a bug in this workflow).
+        required: false
+      tailscale-oauth-client-id:
+        description: "Tailscale OAuth client ID (scope: auth_keys, with the tags in tailscale-tags). Only read when join-tailscale is true."
+        required: false
+      tailscale-oauth-secret:
+        description: "Tailscale OAuth client secret for tailscale-oauth-client-id. Only read when join-tailscale is true."
         required: false
 
 permissions:
@@ -393,6 +428,18 @@ jobs:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
+      - name: Join the tailnet (tailscale/github-action)
+        # Only when the caller asks for it: a Vault or backend endpoint that is
+        # reachable over the tailnet only (internal LB + subnet router). Runs
+        # BEFORE the Vault login below, which would otherwise time out.
+        if: ${{ inputs.join-tailscale }}
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.tailscale-oauth-client-id }}
+          oauth-secret: ${{ secrets.tailscale-oauth-secret }}
+          tags: ${{ inputs.tailscale-tags }}
+          args: ${{ inputs.tailscale-args }}
+
       - name: Fetch secrets from Vault via GitHub OIDC
         # Vault-native path for provider credentials / sensitive TF_VARs: the
         # job's OIDC token → Vault JWT auth (bound to this repo/ref by the role)
@@ -524,6 +571,18 @@ jobs:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
+      - name: Join the tailnet (tailscale/github-action)
+        # Only when the caller asks for it: a Vault or backend endpoint that is
+        # reachable over the tailnet only (internal LB + subnet router). Runs
+        # BEFORE the Vault login below, which would otherwise time out.
+        if: ${{ inputs.join-tailscale }}
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.tailscale-oauth-client-id }}
+          oauth-secret: ${{ secrets.tailscale-oauth-secret }}
+          tags: ${{ inputs.tailscale-tags }}
+          args: ${{ inputs.tailscale-args }}
+
       - name: Fetch secrets from Vault via GitHub OIDC
         # Vault-native path for provider credentials / sensitive TF_VARs: the
         # job's OIDC token → Vault JWT auth (bound to this repo/ref by the role)
@@ -613,6 +672,18 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Join the tailnet (tailscale/github-action)
+        # Only when the caller asks for it: a Vault or backend endpoint that is
+        # reachable over the tailnet only (internal LB + subnet router). Runs
+        # BEFORE the Vault login below, which would otherwise time out.
+        if: ${{ inputs.join-tailscale }}
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.tailscale-oauth-client-id }}
+          oauth-secret: ${{ secrets.tailscale-oauth-secret }}
+          tags: ${{ inputs.tailscale-tags }}
+          args: ${{ inputs.tailscale-args }}
 
       - name: Fetch secrets from Vault via GitHub OIDC
         # Vault-native path for provider credentials / sensitive TF_VARs: the
