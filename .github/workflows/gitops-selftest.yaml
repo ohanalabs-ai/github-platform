@@ -30,8 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: ⚙️ actionlint
-        run: docker run --rm -v "$PWD":/repo --workdir /repo rhysd/actionlint:1.7.12 -color
+      # scoped to this product's files — the older workflows in this repo carry shellcheck
+      # findings of their own that are not this product's to fix here
+      - name: ⚙️ actionlint (gitops-*.yaml)
+        run: docker run --rm -v "$PWD":/repo --workdir /repo rhysd/actionlint:1.7.12 -color .github/workflows/gitops-argocd-group.yaml .github/workflows/gitops-argocd-gate.yaml .github/workflows/gitops-selftest.yaml
       - name: 📜 bash -n + shellcheck (vendored scripts)
         run: |
           set -euo pipefail
