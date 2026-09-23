@@ -36,9 +36,18 @@ helm_home="${RUNNER_TEMP:-/tmp}/gitops-helm"; mkdir -p "$helm_home/cache" "$helm
 } >> "${GITHUB_ENV:-/dev/null}"
 export HELM_CACHE_HOME="$helm_home/cache" HELM_CONFIG_HOME="$helm_home/config" HELM_DATA_HOME="$helm_home/data"
 
-# yq — always native
+# yq — always native. A GitHub release download from a runner is unauthenticated and gets
+# rate-limited now and then; `curl … && chmod` inside `set -e` swallowed that failure and the
+# job then died at the version print below with no message. Retry, authenticate when a token
+# is around (GITHUB_TOKEN is not a secret to GitHub itself), and fail HERE, loudly.
 if [ -n "${YQ_VERSION:-}" ]; then
-  curl -sSfL -o "$BIN_DIR/yq" "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_${os}_${arch}" && chmod +x "$BIN_DIR/yq"
+  auth=(); [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  if ! curl -sSfL --retry 3 --retry-all-errors --retry-delay 2 "${auth[@]}" -o "$BIN_DIR/yq" \
+       "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_${os}_${arch}"; then
+    echo "::error::toolchain: yq v${YQ_VERSION} (${os}/${arch}) could not be downloaded from github.com releases" >&2
+    exit 1
+  fi
+  chmod +x "$BIN_DIR/yq"
 fi
 
 if [ -n "$TOOLS_IMAGE" ]; then
