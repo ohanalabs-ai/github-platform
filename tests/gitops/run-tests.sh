@@ -146,6 +146,59 @@ if git -C "$root" rev-parse HEAD >/dev/null 2>&1; then
   check "meta needs changed files (same sha → diff)" "[ \"\$(sed -n 's/^status=//p' $d/out)\" = diff ]"
 fi
 
+echo "== refresh (namespace-less rendered objects land in the Application's destination namespace)"
+R2="$W/refresh"; mkdir -p "$R2/bin" "$R2/frag"
+want=1111111111111111111111111111111111111111
+cat > "$R2/bin/argocd" <<EOF
+#!/usr/bin/env bash
+# stub: Synced/Healthy at the wanted sha, destination namespace openobserve
+echo "\$*" >> "$R2/argocd.log"
+printf '{"spec":{"destination":{"namespace":"openobserve"}},"status":{"sync":{"status":"Synced","revision":"$want"},"health":{"status":"Healthy"},"operationState":{"phase":"Succeeded"}}}'
+EOF
+cat > "$R2/bin/kubectl" <<EOF
+#!/usr/bin/env bash
+# stub: logs the namespace of every rollout; the Application object reports the wanted sha
+echo "\$*" >> "$R2/kubectl.log"
+case "\$*" in *"get application"*) printf '{"status":{"sync":{"revision":"$want"}}}' ;; *) exit 0 ;; esac
+EOF
+chmod +x "$R2/bin/argocd" "$R2/bin/kubectl"
+# a NATS-like subchart render: StatefulSet + Deployment WITHOUT metadata.namespace, one Deployment with it
+cat > "$R2/head.yaml" <<'EOF'
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openobserve-nats
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openobserve-nats-box
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openobserve
+  namespace: openobserve-explicit
+EOF
+( PATH="$R2/bin:$PATH" APP=openobserve UNIT_PATH=addons/platform/openobserve WANT="$want" IN_ARGOCD=true FRAG_DIR="$R2/frag" \
+    KUBECONFIG_CONTENT="apiVersion: v1" RENDERED="$R2/head.yaml" RUNNER_TEMP="$R2" TIMEOUT=30 POLL=1 \
+    GITHUB_STEP_SUMMARY="$R2/summary.md" bash "$A/argocd-refresh/argocd-refresh.sh" > "$R2/out.log" 2>&1; echo "rc=$?" > "$R2/rc" )
+check "refresh validated" "grep -q '^rc=0' $R2/rc && [ \"\$(jq -r .status $R2/frag/act-openobserve.json)\" = validated ]"
+check "namespace-less StatefulSet checked in the destination namespace (not default)" "grep -q -- '-n openobserve rollout status StatefulSet/openobserve-nats' $R2/kubectl.log"
+check "namespace-less Deployment checked in the destination namespace" "grep -q -- '-n openobserve rollout status Deployment/openobserve-nats-box' $R2/kubectl.log"
+check "an explicit metadata.namespace wins" "grep -q -- '-n openobserve-explicit rollout status Deployment/openobserve' $R2/kubectl.log"
+check "never namespace default" "! grep -q -- '-n default ' $R2/kubectl.log"
+# no destination in argocd's answer → the manifest is the fallback
+cat > "$R2/bin/argocd" <<EOF
+#!/usr/bin/env bash
+printf '{"status":{"sync":{"status":"Synced","revision":"$want"},"health":{"status":"Healthy"}}}'
+EOF
+printf 'apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata: {name: openobserve}\nspec:\n  destination: {namespace: from-manifest}\n' > "$R2/app.yaml"
+: > "$R2/kubectl.log"
+( PATH="$R2/bin:$PATH" APP=openobserve WANT="$want" IN_ARGOCD=true FRAG_DIR="$R2/frag2" KUBECONFIG_CONTENT="apiVersion: v1" RENDERED="$R2/head.yaml" \
+    MANIFEST="$R2/app.yaml" RUNNER_TEMP="$R2" TIMEOUT=30 POLL=1 GITHUB_STEP_SUMMARY="$R2/summary2.md" bash "$A/argocd-refresh/argocd-refresh.sh" >/dev/null 2>&1 || true )
+check "manifest fallback for the destination namespace" "grep -q -- '-n from-manifest rollout status StatefulSet/openobserve-nats' $R2/kubectl.log"
+
 echo "== report + gate"
 R="$W/report"; mkdir -p "$R/frags" "$R/out" "$R/groups"
 units='[{"app":"a","path":"x/a","tier":"t"},{"app":"b","path":"x/b","tier":"t"},{"app":"c","path":"x/c","tier":"t"},{"app":"d","path":"x/d","tier":"t"}]'

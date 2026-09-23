@@ -592,6 +592,7 @@ jobs:
           kubeconfig-content: ${{ steps.vault.outputs.KUBECONFIG_CONTENT }}
           kubeconfig-hint: ${{ inputs.kubeconfig-vault-path != '' && format('vault-addr / {0}', inputs.kubeconfig-vault-path) || 'kubeconfig-vault-path unset' }}
           rendered: ${{ runner.temp }}/rendered/head.yaml
+          manifest: ${{ matrix.manifest || '' }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && matrix.noop != true
