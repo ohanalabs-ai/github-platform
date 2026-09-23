@@ -58,7 +58,12 @@ if [ -n "$TOOLS_IMAGE" ]; then
     cat > "$BIN_DIR/$t" <<EOF
 #!/usr/bin/env bash
 # shim → $TOOLS_IMAGE $t (actions/gitops/toolchain)
-exec docker run --rm --network host \\
+# Run as the runner's uid/gid, not root: kustomize's helm pull writes charts/ into the
+# caller's tree (render-diff copies the checkout to /tmp/render-kustomize.*), and root-owned
+# files there make the caller's cleanup fail ("rm: cannot remove …: Permission denied" →
+# "HEAD build failed", planeo-infra #317, 2026-09-23). HOME must exist for the mapped uid.
+mkdir -p /tmp/gitops-home
+exec docker run --rm --network host --user "\$(id -u):\$(id -g)" \\
   -v "\${RUNNER_WORKSPACE:-\$PWD}":"\${RUNNER_WORKSPACE:-\$PWD}" -v "\${RUNNER_TEMP:-/tmp}":"\${RUNNER_TEMP:-/tmp}" -v /tmp:/tmp \\
   -w "\$PWD" -e HOME=/tmp/gitops-home \\
   -e ARGOCD_SERVER -e ARGOCD_AUTH_TOKEN -e ARGOCD_OPTS -e KUBECONFIG \\
