@@ -191,9 +191,12 @@ on:
       agent-validated:
         description: >-
           Explicit bypass of the target Environment's required-reviewer
-          pause, for an automated caller (e.g. an agent) that has already
-          validated the plan itself and is not a human waiting at a "Review
-          deployments" prompt. Mechanism: deploy/destroy reference
+          pause, for an automated caller that has already validated the plan
+          itself and is not a human waiting at a "Review deployments" prompt —
+          an agent, OR a `push` to the default branch whose plan was already
+          reviewed on the pull request (`agent-validated: ${{ github.event_name
+          == 'push' }}`: merge = approval; a workflow_dispatch keeps the
+          reviewer pause). Mechanism: deploy/destroy reference
           "<terraform-environment-name>-unattended" instead of
           "<terraform-environment-name>" when this is true — same job, a
           different (by default unprotected) Environment name, not a
@@ -201,8 +204,10 @@ on:
           expected-deploy-events — those still gate whether this runs at
           all. Restricting WHO may set this to true is the CALLING repo's
           responsibility (e.g. restrict which actors/branches can trigger
-          workflow_dispatch at all) — this workflow only provides the
-          mechanism, not caller-identity enforcement.
+          workflow_dispatch at all, and give the "-unattended" Environment a
+          deployment-branch policy limited to the default branch(es) so only
+          a merge can reach it) — this workflow only provides the mechanism,
+          not caller-identity enforcement.
         required: false
         type: boolean
         default: false

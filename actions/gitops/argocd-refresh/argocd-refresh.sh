@@ -19,7 +19,16 @@
 #   KUBECONFIG_CONTENT           optional read-only kubeconfig (from Vault) → in-cluster cross-check
 #   KUBECONFIG_HINT              text when no kubeconfig is configured
 #   RENDERED                     the unit's head.yaml (rollouts to wait for), optional
+#   MANIFEST                     the unit's Application manifest (repo-relative), optional — a
+#                                fallback source of spec.destination.namespace
+#   DESTINATION_NAMESPACE        explicit override of the destination namespace, optional
 #   TIMEOUT(900) POLL(20)
+#
+# Namespace of a rendered object: `metadata.namespace` when the manifest carries one, else the
+# Application's `spec.destination.namespace` (read from `argocd app get -o json`, then from
+# MANIFEST), and only then `default` — a Helm subchart typically renders its objects WITHOUT a
+# namespace and ArgoCD places them in the destination namespace; `${ns:-default}` looked for
+# openobserve's NATS StatefulSet in `default` and failed a healthy unit (planeo-infra, 2026-09-23).
 # Writes FRAG_DIR/act-<app>.json {app,status:validated|new|refresh-failed|validate-failed,revision,health,note}
 # + act-<app>.md; exits non-zero unless validated (or new).
 set -uo pipefail
@@ -27,6 +36,7 @@ set -uo pipefail
 UNIT_PATH="${UNIT_PATH:-}"; IN_ARGOCD="${IN_ARGOCD:-unknown}"; NEW_APPS_APPEAR_AFTER_MERGE="${NEW_APPS_APPEAR_AFTER_MERGE:-false}"
 NEW_APP_HINT="${NEW_APP_HINT:-it is created by the bootstrap}"; KUBECONFIG_CONTENT="${KUBECONFIG_CONTENT:-}"
 KUBECONFIG_HINT="${KUBECONFIG_HINT:-kubeconfig-vault-path not configured}"; RENDERED="${RENDERED:-}"
+MANIFEST="${MANIFEST:-}"; DESTINATION_NAMESPACE="${DESTINATION_NAMESPACE:-}"
 TIMEOUT="${TIMEOUT:-900}"; POLL="${POLL:-20}"; SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 mkdir -p "$FRAG_DIR"; md="$FRAG_DIR/act-$APP.md"; [ -f "$md" ] || { echo "#### \`$APP\` — \`$UNIT_PATH\`"; echo; } > "$md"
 st="validated"; notes=()
@@ -55,6 +65,11 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 if [ "$rev" != "$WANT" ] || [ "$health" != Healthy ] || [ "$sync" != Synced ]; then st="validate-failed"; notes+=("ArgoCD: revision ${rev::7} (want ${WANT::7}), sync $sync, health $health after $((TIMEOUT/60)) min"); fi
 echo "- ArgoCD: revision \`${rev::7}\` (want \`${WANT::7}\`), sync **$sync**, health **$health**" >> "$md"
+# the namespace a namespace-less rendered object lands in: the Application's destination
+dest_ns="$DESTINATION_NAMESPACE"
+[ -n "$dest_ns" ] || [ ! -s "$tmp/app.json" ] || dest_ns=$(jq -r '.spec.destination.namespace // ""' "$tmp/app.json" 2>/dev/null || true)
+[ -n "$dest_ns" ] || [ -z "$MANIFEST" ] || [ ! -f "$MANIFEST" ] || dest_ns=$(yq -r '.spec.destination.namespace // ""' "$MANIFEST" 2>/dev/null || true)
+[ -n "$dest_ns" ] || dest_ns=default
 # 2. in-cluster cross-check with a read-only kubeconfig
 if [ -n "$KUBECONFIG_CONTENT" ]; then
   export KUBECONFIG="$tmp/kubeconfig"; umask 077; printf '%s' "$KUBECONFIG_CONTENT" > "$KUBECONFIG"
@@ -64,8 +79,9 @@ if [ -n "$KUBECONFIG_CONTENT" ]; then
   if [ -n "$RENDERED" ] && [ -f "$RENDERED" ]; then
     while IFS='|' read -r kind ns name; do
       [ -n "$name" ] || continue
-      if kubectl -n "${ns:-default}" rollout status "$kind/$name" --timeout=300s >/dev/null 2>&1; then echo "- ✅ rollout \`${ns:-default}/$kind/$name\`" >> "$md"
-      else echo "- ❌ rollout \`${ns:-default}/$kind/$name\` not complete" >> "$md"; st="validate-failed"; notes+=("rollout $kind/$name"); fi
+      ns="${ns:-$dest_ns}" # a namespace-less object (Helm subcharts) lands in the destination namespace
+      if kubectl -n "$ns" rollout status "$kind/$name" --timeout=300s >/dev/null 2>&1; then echo "- ✅ rollout \`$ns/$kind/$name\`" >> "$md"
+      else echo "- ❌ rollout \`$ns/$kind/$name\` not complete" >> "$md"; st="validate-failed"; notes+=("rollout $ns/$kind/$name"); fi
     done < <(yq -N 'select(.kind=="Deployment" or .kind=="StatefulSet" or .kind=="DaemonSet") | .kind + "|" + (.metadata.namespace // "") + "|" + .metadata.name' "$RENDERED" 2>/dev/null)
   fi
 else

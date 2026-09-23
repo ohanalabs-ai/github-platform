@@ -20,6 +20,8 @@ The unit's own **rendered base→head diff** (`🧩 render`) is read next to the
 
 Post-merge (mode=refresh) statuses: `validated` ✅ (sync.revision == the merged SHA, Synced, Healthy, kubectl cross-check when configured), `new` 🆕, `refresh-failed` / `validate-failed` 💥.
 
+**Rollouts and namespaces (the kubectl cross-check).** The refresh waits for every Deployment / StatefulSet / DaemonSet the unit renders. A rendered object's namespace is its `metadata.namespace` when the manifest carries one; otherwise the **Application's `spec.destination.namespace`** (read from `argocd app get -o json`, then from the unit's `manifest`), and only then `default` — a Helm **subchart** typically renders its workloads without a namespace and ArgoCD places them in the destination. Before 2026-09-23 the check assumed `default` and reported `validate-failed` on a healthy `openobserve` (NATS `StatefulSet/openobserve-nats` and `Deployment/openobserve-nats-box` live in `openobserve`, Ready 3/3 and 1/1 — planeo-infra run 35811179949). Render object keys (`kind__ns__name`) are unaffected: they use `_cluster` for namespace-less objects on purpose.
+
 ## The no-op policy
 
 The Applications auto-sync from the target branch, so **a merge IS a deploy**, and a deploy that changes nothing is a defect until proven otherwise: either the change is cosmetic (say so — a docs-only change is `meta`), or the author believed it would take effect when it will not (a values key at the wrong nesting, a token already substituted, a manifest the chart ignores). Failing the check forces the question before the merge. The escape hatch is the repo variable `GITOPS_BLOCK_NOOP=false` (input `block-noop`), meant for adopting a cluster whose live state already matches git — never a `[skip ci]`.
