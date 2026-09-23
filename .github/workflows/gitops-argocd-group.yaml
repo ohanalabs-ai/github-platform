@@ -407,10 +407,12 @@ jobs:
         run: echo "nothing in ${{ inputs.group }} · ${{ inputs.cluster }} changed — nothing to ${{ inputs.mode }}"
 
       # Both ArgoCD and Vault are tailnet-only: without the Tailscale OAuth client the live step
-      # is impossible. Decided in a STEP, not the job-level `env:` — in a reusable workflow the
-      # `secrets` context evaluated at job level came out EMPTY for inherited organization
-      # secrets (seen live 2026-09-23: every unit read "skipped (no Tailscale OAuth secrets)"
-      # while the caller had them); at step level the same expression sees them.
+      # is impossible. CALLERS MUST PASS THE SECRETS EXPLICITLY (`secrets: { TS_OAUTH_CLIENT_ID:
+      # ${{ secrets.TS_OAUTH_CLIENT_ID }}, … }`): `secrets: inherit` did NOT deliver the caller
+      # org's secrets (organization secrets scoped to selected repositories, planeodev) to this
+      # workflow hosted in another org (ohanalabs-ai) — seen live 2026-09-23, every unit read
+      # "skipped (no Tailscale OAuth secrets)" at job AND step level while the caller's old inline
+      # workflow saw them. Decided in a step so the value is logged next to the verdict.
       - name: 🔎 Tailscale OAuth secrets present?
         if: matrix.noop != true
         env:

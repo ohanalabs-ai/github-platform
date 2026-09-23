@@ -6,7 +6,7 @@ The render half needs nothing but the repository. The live half (`🔍 diff`, `�
 |---|---|---|
 | Variable | `ARGOCD_SERVER` | passed as `argocd-server`; unset → every live cell reads *skipped (no ARGOCD_SERVER)* and the run stays green |
 | Variable | `VAULT_ADDR` | passed as `vault-addr`; the ArgoCD CI token (and the read-only kubeconfig after a merge) are read from Vault with the job's **GitHub OIDC token** (`hashicorp/vault-action`, method `jwt`) |
-| Secret (organization, scoped to the GitOps repos) | `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` | a Tailscale OAuth client (tag `tag:ci`) — ArgoCD and Vault are tailnet-only; unset → *skipped (no Tailscale OAuth secrets)* |
+| Secret (organization, scoped to the GitOps repos) | `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` | a Tailscale OAuth client (tag `tag:ci`) — ArgoCD and Vault are tailnet-only; unset → *skipped (no Tailscale OAuth secrets)*. **Pass them explicitly in the caller's `secrets:` block** — `secrets: inherit` did not deliver these selected-repo organization secrets to the workflow hosted in another org (seen 2026-09-23) |
 | Secret | `ARGOCD_AUTH_TOKEN` | **pre-Vault fallback only**, used when `vault-addr` is empty |
 | Variable | `AWS_ROLE_ARN`, `AWS_REGION` | optional (`aws-role-arn`/`aws-region`) for a repo whose live diff needs AWS |
 | Variable | `GITOPS_BLOCK_NOOP` | `false` downgrades a blocked no-op to a warning (`block-noop`) |

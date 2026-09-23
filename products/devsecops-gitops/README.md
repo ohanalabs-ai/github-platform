@@ -69,7 +69,7 @@ merge
 | `sticky-comment` | `true` | post the group comment (mode=diff, pull_request events) |
 | `tailscale-tags` | `tag:ci` | tags of the ephemeral tailnet node |
 
-Secrets: `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` (Tailscale OAuth client; unset → *skipped-no-tailnet*), `ARGOCD_AUTH_TOKEN` (pre-Vault fallback only). Callers use `secrets: inherit` or pass them explicitly.
+Secrets: `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` (Tailscale OAuth client; unset → *skipped-no-tailnet*), `ARGOCD_AUTH_TOKEN` (pre-Vault fallback only). **Pass them explicitly** — `secrets: inherit` did not deliver a caller org's secrets (organization secrets scoped to selected repositories, in `planeodev`) to this workflow hosted in `ohanalabs-ai`: every live unit read *skipped (no Tailscale OAuth secrets)* at job and step level (2026-09-23) while the caller's previous inline workflow saw them. The gate workflow declares no secrets (`secrets: inherit` or nothing).
 
 Gate inputs (`gitops-argocd-gate.yaml`): `results-json` (`${{ toJson(needs) }}`, required), `title` (`GitOps`), `comment` (`true`), `mode` (`diff`).
 
@@ -82,7 +82,10 @@ jobs:
   core:
     name: 🧱 core
     uses: ohanalabs-ai/github-platform/.github/workflows/gitops-argocd-group.yaml@main
-    secrets: inherit
+    secrets: # explicit — `inherit` does not carry another org's selected-repo secrets here
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+      ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
     with:
       cluster: platform-aws-eks-use1-prd
       group: core
@@ -120,7 +123,10 @@ jobs:
   customers:
     name: 🧑‍🤝‍🧑 customers
     uses: ohanalabs-ai/github-platform/.github/workflows/gitops-argocd-group.yaml@main
-    secrets: inherit
+    secrets: # explicit — `inherit` does not carry another org's selected-repo secrets here
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+      ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
     with:
       cluster: platform-aws-eks-use1-prd
       group: customers
