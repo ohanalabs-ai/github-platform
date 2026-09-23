@@ -194,9 +194,9 @@ on:
           pause, for an automated caller that has already validated the plan
           itself and is not a human waiting at a "Review deployments" prompt —
           an agent, OR a `push` to the default branch whose plan was already
-          reviewed on the pull request (`agent-validated: ${{ github.event_name
-          == 'push' }}`: merge = approval; a workflow_dispatch keeps the
-          reviewer pause). Mechanism: deploy/destroy reference
+          reviewed on the pull request (the caller passes the expression
+          "github.event_name == 'push'": merge = approval; a workflow_dispatch
+          keeps the reviewer pause). Mechanism: deploy/destroy reference
           "<terraform-environment-name>-unattended" instead of
           "<terraform-environment-name>" when this is true — same job, a
           different (by default unprotected) Environment name, not a
