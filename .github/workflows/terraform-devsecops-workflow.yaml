@@ -67,6 +67,22 @@
 #     "<terraform-environment-name>" when agent-validated is true. That
 #     derived name has no protection rules unless the calling repo
 #     deliberately adds them.
+#   - Added `gcp-workload-identity-provider` / `gcp-service-account` (+ optional
+#     `gcp-project-id`): keyless Google Cloud auth with the job's GitHub OIDC
+#     token (google-github-actions/auth → Workload Identity Federation) before
+#     terraform runs in plan/deploy/destroy — the GCP twin of `aws-role-arn`.
+#     Mutually exclusive with the AWS inputs (validate-inputs fails fast; one
+#     root, one cloud identity). `gcp-project-id` is also exported as
+#     GOOGLE_CLOUD_QUOTA_PROJECT: a federated credential carries no quota
+#     project, and the Go client libraries (the gcs backend, the google
+#     provider) then bill/quota-check against nothing — a backend bucket in a
+#     project other than the service account's own can 403 for that reason.
+#     First caller: planeodev/planeo-infra's cloud roots (cloud-roots.yml).
+#   - Added `run-plan` (default true): false skips plan — and therefore
+#     deploy/destroy, which need it — leaving lint/validate only. For a root
+#     whose CI identity does not exist yet: its first apply is the laptop
+#     bootstrap that creates that identity, and the PR adding it must still go
+#     green.
 name: 🌎 terraform-devsecops-workflow
 
 on:
@@ -119,10 +135,53 @@ on:
         default: ""
 
       aws-role-arn:
-        description: "IAM role ARN to assume via GitHub OIDC. Leave both this and aws-region empty to skip AWS auth entirely."
+        description: "IAM role ARN to assume via GitHub OIDC. Leave both this and aws-region empty to skip AWS auth entirely. Mutually exclusive with gcp-workload-identity-provider."
         required: false
         type: string
         default: ""
+
+      gcp-workload-identity-provider:
+        description: >-
+          Full resource name of the Google Cloud Workload Identity Provider the
+          job's GitHub OIDC token is federated into
+          (projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>).
+          Set together with gcp-service-account; leave both empty to skip GCP
+          auth entirely. Mutually exclusive with aws-role-arn — one root, one
+          cloud identity. The provider's attribute condition (repository, ref)
+          is what restricts who may use it; nothing here is a secret.
+        required: false
+        type: string
+        default: ""
+
+      gcp-service-account:
+        description: "Email of the Google Cloud service account to impersonate through gcp-workload-identity-provider (roles/iam.workloadIdentityUser granted to the federated principal). Set together with gcp-workload-identity-provider."
+        required: false
+        type: string
+        default: ""
+
+      gcp-project-id:
+        description: >-
+          Optional default Google Cloud project. Passed to google-github-actions/auth
+          (exports GOOGLE_CLOUD_PROJECT / CLOUDSDK_CORE_PROJECT) AND exported as
+          GOOGLE_CLOUD_QUOTA_PROJECT, the project API calls are billed and
+          quota-checked against — a federated credential carries none, and a
+          state bucket outside the service account's own project may 403
+          without it. The service account needs roles/serviceusage.serviceUsageConsumer
+          there. Only read when gcp-workload-identity-provider is set.
+        required: false
+        type: string
+        default: ""
+
+      run-plan:
+        description: >-
+          Run the plan job (default true). false = lint/validate only: plan is
+          skipped and so are deploy/destroy, which need it. For a Terraform root
+          whose CI identity does not exist yet — its FIRST apply is the laptop
+          bootstrap that creates the very identity this workflow would federate
+          into — so the pull request adding the root can still go green.
+        required: false
+        type: boolean
+        default: true
 
       enable-shift-left-scan:
         description: "Run the tfsec/terrascan security-scan matrix job."
@@ -297,7 +356,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # for aws-actions/configure-aws-credentials (OIDC) — no-op if aws-role-arn is empty
+  id-token: write # for aws-actions/configure-aws-credentials / google-github-actions/auth (OIDC) — no-op if neither aws-role-arn nor gcp-workload-identity-provider is set
 
 jobs:
   validate-inputs:
@@ -308,6 +367,24 @@ jobs:
         if: ${{ (inputs.aws-region != '' && inputs.aws-role-arn == '') || (inputs.aws-region == '' && inputs.aws-role-arn != '') }}
         run: |
           echo "::error::aws-region and aws-role-arn must either both be set (to enable AWS OIDC auth) or both be empty (to skip it) — got aws-region='${{ inputs.aws-region }}' aws-role-arn='${{ inputs.aws-role-arn }}'"
+          exit 1
+
+      - name: Check gcp-workload-identity-provider/gcp-service-account are both set or both empty
+        if: ${{ (inputs.gcp-workload-identity-provider != '' && inputs.gcp-service-account == '') || (inputs.gcp-workload-identity-provider == '' && inputs.gcp-service-account != '') }}
+        run: |
+          echo "::error::gcp-workload-identity-provider and gcp-service-account must either both be set (to enable GCP Workload Identity Federation) or both be empty (to skip it) — got gcp-workload-identity-provider='${{ inputs.gcp-workload-identity-provider }}' gcp-service-account='${{ inputs.gcp-service-account }}'"
+          exit 1
+
+      - name: Check AWS and GCP auth are not both requested
+        if: ${{ inputs.aws-role-arn != '' && inputs.gcp-workload-identity-provider != '' }}
+        run: |
+          echo "::error::aws-role-arn and gcp-workload-identity-provider are mutually exclusive — a root authenticates to ONE cloud; a resource consumed from the other cloud is that cloud's own trust (e.g. a WIF pool), not a second credential here"
+          exit 1
+
+      - name: Check gcp-project-id is only set together with GCP auth
+        if: ${{ inputs.gcp-project-id != '' && inputs.gcp-workload-identity-provider == '' }}
+        run: |
+          echo "::error::gcp-project-id is only read when gcp-workload-identity-provider/gcp-service-account are set — got gcp-project-id='${{ inputs.gcp-project-id }}' without them"
           exit 1
 
       - name: Check enable-shift-left-scan has a config path
@@ -400,6 +477,9 @@ jobs:
 
   plan:
     name: 📝️ plan
+    # run-plan false = lint/validate only (a root whose CI identity is not
+    # bootstrapped yet); deploy/destroy `needs: [plan]`, so they are skipped too.
+    if: ${{ inputs.run-plan }}
     needs: [lint]
     runs-on: ${{ inputs.github-actions-runner }}
     strategy:
@@ -432,6 +512,28 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Authenticate to Google Cloud via OIDC (Workload Identity Federation)
+        # The GCP twin of the AWS step above: the job's GitHub OIDC token is
+        # exchanged at STS for the service account's credentials — no key is
+        # minted, stored or rotated. Mutually exclusive with aws-role-arn
+        # (validate-inputs). project_id becomes the default project of every
+        # Google client library in the job.
+        if: ${{ inputs.gcp-workload-identity-provider != '' }}
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+          project_id: ${{ inputs.gcp-project-id }}
+
+      - name: Export GOOGLE_CLOUD_QUOTA_PROJECT
+        # A federated credential carries no quota project; the Go client libraries
+        # (terraform's gcs backend, the google provider) then bill/quota-check the
+        # request against nothing, and a bucket in a project other than the service
+        # account's own can answer 403 (UserProjectAccountProblem / USER_PROJECT_DENIED).
+        # The env var is the override every Google auth library honours.
+        if: ${{ inputs.gcp-project-id != '' }}
+        run: echo "GOOGLE_CLOUD_QUOTA_PROJECT=${{ inputs.gcp-project-id }}" >> "$GITHUB_ENV"
 
       - name: Join the tailnet (tailscale/github-action)
         # Only when the caller asks for it: a Vault or backend endpoint that is
@@ -576,6 +678,28 @@ jobs:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
+      - name: Authenticate to Google Cloud via OIDC (Workload Identity Federation)
+        # The GCP twin of the AWS step above: the job's GitHub OIDC token is
+        # exchanged at STS for the service account's credentials — no key is
+        # minted, stored or rotated. Mutually exclusive with aws-role-arn
+        # (validate-inputs). project_id becomes the default project of every
+        # Google client library in the job.
+        if: ${{ inputs.gcp-workload-identity-provider != '' }}
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+          project_id: ${{ inputs.gcp-project-id }}
+
+      - name: Export GOOGLE_CLOUD_QUOTA_PROJECT
+        # A federated credential carries no quota project; the Go client libraries
+        # (terraform's gcs backend, the google provider) then bill/quota-check the
+        # request against nothing, and a bucket in a project other than the service
+        # account's own can answer 403 (UserProjectAccountProblem / USER_PROJECT_DENIED).
+        # The env var is the override every Google auth library honours.
+        if: ${{ inputs.gcp-project-id != '' }}
+        run: echo "GOOGLE_CLOUD_QUOTA_PROJECT=${{ inputs.gcp-project-id }}" >> "$GITHUB_ENV"
+
       - name: Join the tailnet (tailscale/github-action)
         # Only when the caller asks for it: a Vault or backend endpoint that is
         # reachable over the tailnet only (internal LB + subnet router). Runs
@@ -677,6 +801,28 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Authenticate to Google Cloud via OIDC (Workload Identity Federation)
+        # The GCP twin of the AWS step above: the job's GitHub OIDC token is
+        # exchanged at STS for the service account's credentials — no key is
+        # minted, stored or rotated. Mutually exclusive with aws-role-arn
+        # (validate-inputs). project_id becomes the default project of every
+        # Google client library in the job.
+        if: ${{ inputs.gcp-workload-identity-provider != '' }}
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+          project_id: ${{ inputs.gcp-project-id }}
+
+      - name: Export GOOGLE_CLOUD_QUOTA_PROJECT
+        # A federated credential carries no quota project; the Go client libraries
+        # (terraform's gcs backend, the google provider) then bill/quota-check the
+        # request against nothing, and a bucket in a project other than the service
+        # account's own can answer 403 (UserProjectAccountProblem / USER_PROJECT_DENIED).
+        # The env var is the override every Google auth library honours.
+        if: ${{ inputs.gcp-project-id != '' }}
+        run: echo "GOOGLE_CLOUD_QUOTA_PROJECT=${{ inputs.gcp-project-id }}" >> "$GITHUB_ENV"
 
       - name: Join the tailnet (tailscale/github-action)
         # Only when the caller asks for it: a Vault or backend endpoint that is
