@@ -1,0 +1,9 @@
+# actionlint configuration (https://github.com/rhysd/actionlint/blob/main/docs/config.md)
+paths:
+  # The gitops reusable workflows check out THIS repo's composite actions at the commit of
+  # the reusable workflow file — `job.workflow_sha` ("the commit SHA of the workflow file
+  # that defines the current job", GitHub contexts reference; `github.job_workflow_sha` is
+  # the older name, kept as the fallback). actionlint ≤ 1.7.12 knows neither; the runtime does.
+  .github/workflows/gitops-argocd-*.yaml:
+    ignore:
+      - 'property "(job_)?workflow_sha" is not defined in object type'

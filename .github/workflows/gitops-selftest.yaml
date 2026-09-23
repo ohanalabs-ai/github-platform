@@ -1,0 +1,62 @@
+# 🧪 Self-test of the devsecops-gitops product on THIS repo's pull requests: lint the
+# workflows + vendored scripts, then run tests/gitops/run-tests.sh — the render paths
+# (kustomize; multi-source `helm template` with a real public chart bump; the fallback when a
+# chart cannot be templated), EVERY live verdict against a stub `argocd` (diff · noop ·
+# noop-allowed · noop-expected · noop-prune-nothing · noop-live-equal · meta · new · error,
+# plus the 3× cache-miss retry that must use `app get --refresh -o json`), the report cells
+# and the gate summary. No cluster, no secrets.
+name: 🧪 gitops-selftest
+run-name: "🧪 devsecops-gitops self-test — ${{ github.event.pull_request.title || github.ref_name }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/gitops-*.yaml"
+      - "actions/gitops/**"
+      - "tests/gitops/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/gitops-*.yaml"
+      - "actions/gitops/**"
+      - "tests/gitops/**"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: 🚨 lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: ⚙️ actionlint
+        run: docker run --rm -v "$PWD":/repo --workdir /repo rhysd/actionlint:1.7.12 -color
+      - name: 📜 bash -n + shellcheck (vendored scripts)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck >/dev/null
+          for f in actions/gitops/*/*.sh tests/gitops/*.sh; do bash -n "$f"; done
+          shellcheck -S warning actions/gitops/*/*.sh tests/gitops/*.sh
+          echo "ok: $(find actions/gitops tests/gitops -name '*.sh' | wc -l) scripts"
+      - name: 🎯 argocd app get never uses -o name
+        run: |
+          if grep -rnE 'app get [^|;&]*-o (name|NAME)\b' actions .github/workflows | grep -v 'never'; then echo "::error::'argocd app get … -o name' is not a valid output format"; exit 1; fi
+          echo "ok"
+
+  tests:
+    name: 🧪 scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: 🧰 toolchain (pinned releases)
+        uses: ./actions/gitops/toolchain
+        with:
+          tools: kustomize helm
+      - name: 🧪 tests/gitops/run-tests.sh
+        run: |
+          set -o pipefail
+          bash tests/gitops/run-tests.sh 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          rc=${PIPESTATUS[0]}
+          { echo "### 🧪 devsecops-gitops self-test"; echo '```'; cat "$RUNNER_TEMP/tests.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

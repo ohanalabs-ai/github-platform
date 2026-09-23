@@ -11,6 +11,9 @@ Each reusable workflow has its own usage doc under `products/`:
 - [`products/devsecops-docker/`](products/devsecops-docker/README.md) — `docker-multiarch-cicd.yaml`
 - [`products/devsecops-terraform/`](products/devsecops-terraform/README.md) — `terraform-devsecops-workflow.yaml`
 - [`products/devsecops-github/`](products/devsecops-github/README.md) — GitHub repo-hygiene workflows (multiple capabilities, one per file under its own `capabilities/`), e.g. `github-team-codeowners-actions.yaml`
+- [`products/devsecops-gitops/`](products/devsecops-gitops/README.md) — `gitops-argocd-group.yaml` + `gitops-argocd-gate.yaml`: per-ArgoCD-Application rendered diff (kustomize / render plugin / `helm template` for multi-source apps), live `argocd app diff` verdicts (a no-op cannot merge), sticky PR comments, post-merge validation + GitHub Deployments; built from the composite actions under [`actions/gitops/`](actions/README.md)
+
+Composite actions this repo's workflows are built from live under [`actions/`](actions/README.md) (`actions/<category>/<name>/action.yaml`); the older standalone library is `ohanalabs-ai/actions` — see that README for the consolidation target.
 
 ## Reusable workflow: `docker-multiarch-cicd`
 

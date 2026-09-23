@@ -1,0 +1,701 @@
+# 🔀 Reusable GitOps checks for ONE group of ArgoCD Applications on ONE cluster — the
+# devsecops-gitops product (products/devsecops-gitops/README.md). Called once per group by a
+# repo's PR-diff workflow (mode=diff) and its post-merge workflow (mode=refresh), so the
+# Checks UI nests `<group> / 🧭 discover`, `<group> / 🧩 render <app>`, `<group> / 🔍 diff <app>`
+# (or `♻️ refresh <app>`), `<group> / 📋 result` — one readable block per group. A group
+# nothing touched runs discover + a `(no units)` placeholder row + result, green in seconds.
+#
+#   🧭 discover   changed files ∩ watch-paths → this group's units through the CALLER's
+#                 `discover-command` (the unit contract: {app,path,tier,local,multi_source,
+#                 render_only,plugin,manifest?,feeds?}) — actions/gitops/discover-units
+#   🧩 render     THE PRIMARY SIGNAL, independent of ArgoCD: render the unit in the PR HEAD
+#                 and in the PR BASE (a second checkout), split per object, normalise, diff
+#                 → "expected change after merge": objects added/changed/removed + the
+#                 unified diff, the component tree and — when it changes — a Mermaid graph.
+#                 kustomize build (or the repo's render plugin script with placeholder
+#                 CHANGE_ME_* values); a MULTI-SOURCE Application (OCI/HTTP chart + $values
+#                 + git path) is rendered with `helm template` at the pinned chart version
+#                 plus its git source, so a values edit or a chart bump is a real diff —
+#                 actions/gitops/render-diff
+#   🔍 diff       mode=diff, THE SECOND OPINION: `argocd app diff <app> --revision <PR head>`
+#                 against the live cluster (3× retry on a cache miss) → verdict: diff · new ·
+#                 meta · noop-expected · noop-prune-nothing · noop-live-equal (the render
+#                 changes but the cluster already carries it — pass) · noop-allowed · noop
+#                 (BLOCKED unless block-noop=false) · error — actions/gitops/argocd-diff.
+#                 Multi-source Applications stay render-only here (a single --revision cannot
+#                 evaluate them; the report says so); external/template units are skipped.
+#   ♻️ refresh    mode=refresh: hard-refresh, then VALIDATE the merge landed — poll `argocd app
+#                 get -o json` until the git SHA (status.sync.revision, or revisions[] for a
+#                 multi-source app) == github.sha, Synced and Healthy (15 min); cross-check
+#                 in-cluster with a read-only kubeconfig from Vault when configured — runs in
+#                 the GitHub Environment <cluster>-<group> — actions/gitops/argocd-refresh
+#   📋 result     one table for the group (unit | objects | expected change | live), per-unit
+#                 details collapsed, ONE sticky PR comment per group (header
+#                 gitops-<cluster>-<group>, deleted when the group has no units), group.json
+#                 for the caller's gate (gitops-argocd-gate.yaml); mode=refresh creates a
+#                 GitHub Deployment for the environment — actions/gitops/group-report
+#
+# Toolchain: `tools-image` (the caller's own image, e.g. the one its deploy uses) → thin
+# docker shims; empty → kustomize/helm/argocd/kubectl from pinned releases (the *-version
+# inputs). yq is always native. actions/gitops/toolchain.
+#
+# The composite actions are checked out from THIS repository at the SAME commit as this
+# workflow file (`job.workflow_sha`, with `github.job_workflow_sha` as the fallback name) — so a caller testing `@<branch>` exercises that
+# branch's actions too, and `@main` follows main. The caller's own `uses:` reference decides
+# which; org policy is `@main` for callers.
+#
+# Every ArgoCD/Vault/tailnet guard is on the STEPS, not the jobs, so a skipped live step still
+# shows the real app name and a "skipped: not configured" row. Third-party actions are pinned
+# by commit SHA.
+name: 🔀 gitops-argocd-group
+run-name: "🔀 GitOps ${{ inputs.mode }} — ${{ inputs.group }} · ${{ inputs.cluster }}"
+
+on:
+  workflow_call:
+    inputs:
+      cluster:
+        description: "The cluster the units belong to (report titles, artifact and environment names, e.g. platform-aws-eks-use1-prd)"
+        type: string
+        required: true
+      group:
+        description: "The group name (e.g. core | platform | customers); also the default ArgoCD project of the environment URL"
+        type: string
+        required: true
+      mode:
+        description: "diff (pull request: render + rendered base-vs-head diff + argocd app diff + sticky comment) | refresh (post-merge: hard-refresh + validation + Deployment)"
+        type: string
+        required: true
+      watch-paths:
+        description: "Multiline list of path globs that belong to this group (tj-actions/changed-files `files`); empty = every changed file"
+        type: string
+        required: false
+        default: ""
+      discover-command:
+        description: "Repo-local command printing {units:[…],unmapped:[…]}; the changed paths are appended as arguments (e.g. `bash clusters/discover-units.sh --json --cluster <c> --group <g>`)"
+        type: string
+        required: true
+      render-plugin-script:
+        description: "Repo-relative render plugin (CMP) script used for units with plugin=true (e.g. addons/platform/argocd/cmp/render.sh); empty = kustomize only"
+        type: string
+        required: false
+        default: ""
+      kustomize-build-args:
+        description: "Flags after `kustomize build`"
+        type: string
+        required: false
+        default: "--enable-helm"
+      helm-kube-version:
+        description: "--kube-version for the multi-source `helm template`"
+        type: string
+        required: false
+        default: "1.33.0"
+      planeo-labels:
+        description: "k=v,k=v passed to the render plugin as PLANEO_LABELS (default planeo.dev/cluster=<cluster>,planeo.dev/ci=true)"
+        type: string
+        required: false
+        default: ""
+      attestation-command:
+        description: "Optional repo-local `<cmd> <unit-path>` printing `attested: N/M` after each render (WARN phase)"
+        type: string
+        required: false
+        default: ""
+      tools-image:
+        description: "Container image shipping kustomize/helm/argocd/kubectl (pulled with the job's GITHUB_TOKEN when on ghcr.io); empty → pinned releases"
+        type: string
+        required: false
+        default: ""
+      kustomize-version:
+        type: string
+        required: false
+        default: "5.8.1"
+      helm-version:
+        type: string
+        required: false
+        default: "3.16.3"
+      argocd-version:
+        type: string
+        required: false
+        default: "3.5.3"
+      kubectl-version:
+        type: string
+        required: false
+        default: "1.36.2"
+      yq-version:
+        type: string
+        required: false
+        default: "4.45.1"
+      argocd-server:
+        description: "ArgoCD host (tailnet), e.g. the caller's vars.ARGOCD_SERVER; empty → the live steps report skipped-no-argocd"
+        type: string
+        required: false
+        default: ""
+      argocd-project:
+        description: "ArgoCD project for the environment URL (default: the group)"
+        type: string
+        required: false
+        default: ""
+      vault-addr:
+        description: "Vault URL, e.g. the caller's vars.VAULT_ADDR; empty → the ARGOCD_AUTH_TOKEN secret is the (pre-Vault) fallback"
+        type: string
+        required: false
+        default: ""
+      vault-jwt-path:
+        description: "Vault JWT auth mount"
+        type: string
+        required: false
+        default: github-jwt
+      vault-jwt-audience:
+        description: "bound_audiences of that mount (e.g. https://github.com/<org>)"
+        type: string
+        required: false
+        default: ""
+      vault-role-pr:
+        description: "Vault role for pull requests (mode=diff)"
+        type: string
+        required: false
+        default: ""
+      vault-role-push:
+        description: "Vault role for pushes (mode=refresh), e.g. gha-<repo>-<branch> (the caller passes github.ref_name)"
+        type: string
+        required: false
+        default: ""
+      argocd-token-vault-path:
+        description: "KV path of the ArgoCD CI token (KV v2: <mount>/data/<path>)"
+        type: string
+        required: false
+        default: ""
+      argocd-token-vault-key:
+        type: string
+        required: false
+        default: auth_token
+      kubeconfig-vault-path:
+        description: "KV path of a read-only kubeconfig for the post-merge in-cluster cross-check; empty → 'kubectl cross-check skipped: not configured'"
+        type: string
+        required: false
+        default: ""
+      kubeconfig-vault-key:
+        type: string
+        required: false
+        default: kubeconfig
+      aws-role-arn:
+        description: "Optional AWS role assumed (OIDC) before the live diff, for repos whose render needs AWS"
+        type: string
+        required: false
+        default: ""
+      aws-region:
+        type: string
+        required: false
+        default: ""
+      block-noop:
+        description: "'false' → a live no-op is a warning (noop-allowed) instead of a blocked merge (callers pass their vars.GITOPS_BLOCK_NOOP, defaulting to 'true')"
+        type: string
+        required: false
+        default: "true"
+      meta-file-pattern:
+        description: "ERE of files under a unit that never reach a rendered manifest (the `meta` verdict)"
+        type: string
+        required: false
+        default: '(^|/)\.render-kustomize$|\.md$'
+      new-app-hint:
+        description: "Who creates an Application that is not in ArgoCD yet (text of the `new` verdict)"
+        type: string
+        required: false
+        default: "it is created after merge (bootstrap or ApplicationSet)"
+      new-apps-appear-after-merge:
+        description: "mode=refresh: 'true' → an Application not in ArgoCD yet is created BY the merge (ApplicationSet) and the refresh polls for it; 'false' → reported as new"
+        type: string
+        required: false
+        default: "false"
+      pr-environment:
+        description: "GitHub Environment the live jobs run in on pull requests (OIDC `environment` claim); must have NO required reviewers"
+        type: string
+        required: false
+        default: gitops
+      environment-name:
+        description: "GitHub Environment of the post-merge refresh (default <cluster>-<group>)"
+        type: string
+        required: false
+        default: ""
+      comment-header:
+        description: "Sticky comment header (default gitops-<cluster>-<group> — keep it so existing comments keep updating)"
+        type: string
+        required: false
+        default: ""
+      sticky-comment:
+        description: "Post/refresh the group's sticky PR comment (mode=diff on pull_request events)"
+        type: boolean
+        required: false
+        default: true
+      tailscale-tags:
+        type: string
+        required: false
+        default: "tag:ci"
+    secrets:
+      TS_OAUTH_CLIENT_ID:
+        description: "Tailscale OAuth client (tag:ci) — ArgoCD and Vault are tailnet-only; unset → the live steps report skipped-no-tailnet"
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
+      ARGOCD_AUTH_TOKEN:
+        description: "Pre-Vault fallback: an ArgoCD token used only when vault-addr is empty"
+        required: false
+
+env:
+  FRAG_PREFIX: gitops-frag-${{ inputs.cluster }}-${{ inputs.group }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  PLATFORM_REPO: ohanalabs-ai/github-platform
+  PLATFORM_DIR: .gitops-platform
+
+jobs:
+  discover:
+    name: 🧭 discover
+    runs-on: ubuntu-latest
+    outputs:
+      units: ${{ steps.units.outputs.units }}
+      matrix: ${{ steps.units.outputs.matrix }}
+      has_changes: ${{ steps.units.outputs.has_changes }}
+      count: ${{ steps.units.outputs.count }}
+      changed_files: ${{ steps.changed.outputs.all_changed_files }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0 # changed-files needs the base to diff against
+
+      - name: 📥 devsecops-gitops actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+
+      - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+        id: changed
+        with:
+          files: ${{ inputs.watch-paths }}
+
+      - name: 🧭 changed paths → this group's units
+        id: units
+        uses: ./.gitops-platform/actions/gitops/discover-units
+        with:
+          command: ${{ inputs.discover-command }}
+          changed-files: ${{ steps.changed.outputs.all_changed_files }}
+          cluster: ${{ inputs.cluster }}
+          group: ${{ inputs.group }}
+          mode: ${{ inputs.mode }}
+
+  render:
+    name: 🧩 render ${{ matrix.app }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: ⏭️ no units in this group
+        if: matrix.noop == true
+        run: echo "nothing in ${{ inputs.group }} · ${{ inputs.cluster }} changed — nothing to render"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: matrix.noop != true
+
+      - name: 📥 devsecops-gitops actions (this workflow's commit)
+        if: matrix.noop != true
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+
+      # The PR base (or, after a merge, the previous commit) — what the cluster renders
+      # TODAY. A hidden dir name: a checkout named after a directory of the repo (`base/`)
+      # would replace it. Missing/unfetchable → reported without an expected-change column.
+      - name: 📥 checkout base tree
+        if: matrix.noop != true && matrix.local == true
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        continue-on-error: true
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: .gitops-base
+
+      - name: 📥 base tree available?
+        if: matrix.noop != true && matrix.local == true
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/.gitops-base/.git" ]; then echo "BASE_TREE=$GITHUB_WORKSPACE/.gitops-base" >> "$GITHUB_ENV"; echo "base tree: $GITHUB_WORKSPACE/.gitops-base"
+          else echo "BASE_TREE=-" >> "$GITHUB_ENV"; echo "::warning::base tree unavailable — expected change not computed"; fi
+
+      - name: 🧰 toolchain (kustomize, helm, yq)
+        if: matrix.noop != true && matrix.local == true
+        uses: ./.gitops-platform/actions/gitops/toolchain
+        with:
+          tools-image: ${{ inputs.tools-image }}
+          registry-token: ${{ github.token }}
+          tools: kustomize helm
+          kustomize-version: ${{ inputs.kustomize-version }}
+          helm-version: ${{ inputs.helm-version }}
+          yq-version: ${{ inputs.yq-version }}
+
+      - name: 🧩 render head + base → expected change, components, Mermaid
+        if: matrix.noop != true
+        id: render
+        uses: ./.gitops-platform/actions/gitops/render-diff
+        with:
+          app: ${{ matrix.app }}
+          path: ${{ matrix.path }}
+          tier: ${{ matrix.tier }}
+          cluster: ${{ inputs.cluster }}
+          local: ${{ matrix.local }}
+          multi-source: ${{ matrix.multi_source || false }}
+          render-only: ${{ matrix.render_only || false }}
+          plugin: ${{ matrix.plugin || false }}
+          manifest: ${{ matrix.manifest || '' }}
+          feeds: ${{ matrix.feeds || '' }}
+          changed-files: ${{ needs.discover.outputs.changed_files }}
+          base-tree: ${{ env.BASE_TREE || '-' }}
+          render-plugin-script: ${{ inputs.render-plugin-script }}
+          kustomize-build-args: ${{ inputs.kustomize-build-args }}
+          helm-kube-version: ${{ inputs.helm-kube-version }}
+          planeo-labels: ${{ inputs.planeo-labels || format('planeo.dev/cluster={0},planeo.dev/ci=true', inputs.cluster) }}
+          attestation-command: ${{ inputs.attestation-command }}
+          artifact-prefix: rendered-${{ inputs.cluster }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.noop != true && steps.render.outputs.rendered != ''
+        with:
+          name: rendered-${{ inputs.cluster }}-${{ matrix.app }}
+          path: ${{ steps.render.outputs.rendered }}
+          retention-days: 14
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.noop != true && steps.render.outputs.difftxt != ''
+        with:
+          name: rendered-${{ inputs.cluster }}-diff-${{ matrix.app }}
+          path: ${{ steps.render.outputs.difftxt }}
+          retention-days: 14
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && matrix.noop != true
+        with:
+          name: ${{ env.FRAG_PREFIX }}-render-${{ matrix.app }}
+          path: ${{ runner.temp }}/frag/
+          retention-days: 3
+
+  # mode=diff → "🔍 diff <app>", mode=refresh → "♻️ refresh <app>". One job (not two
+  # skipped-by-mode jobs) so the Checks UI never shows an unexpanded matrix name. After a
+  # merge the job runs in the GitHub Environment <cluster>-<group>.
+  act:
+    name: ${{ inputs.mode == 'diff' && '🔍 diff' || '♻️ refresh' }} ${{ matrix.app }}
+    needs: [discover, render]
+    if: always() && needs.discover.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.mode == 'refresh' && (inputs.environment-name || format('{0}-{1}', inputs.cluster, inputs.group)) || inputs.pr-environment }}
+      url: ${{ inputs.argocd-server != '' && format('https://{0}/applications?proj={1}', inputs.argocd-server, inputs.argocd-project || inputs.group) || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    env:
+      ARGOCD_SERVER: ${{ inputs.argocd-server }}
+      ARGOCD_OPTS: --grpc-web
+      APP: ${{ matrix.app }}
+      UNIT_PATH: ${{ matrix.path }}
+      LIVE: ${{ matrix.noop != true && matrix.local == true && (inputs.mode == 'refresh' || matrix.render_only == false) }}
+      # both ArgoCD and Vault are tailnet-only: without the Tailscale OAuth client the live step is impossible
+      TAILNET: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '' }}
+    steps:
+      - name: ⏭️ no units in this group
+        if: matrix.noop == true
+        run: echo "nothing in ${{ inputs.group }} · ${{ inputs.cluster }} changed — nothing to ${{ inputs.mode }}"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: matrix.noop != true
+
+      - name: 📥 devsecops-gitops actions (this workflow's commit)
+        if: matrix.noop != true
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+
+      - name: 📝 fragment scaffold
+        if: matrix.noop != true
+        run: |
+          mkdir -p "$RUNNER_TEMP/frag"
+          { echo "#### \`$APP\` (${{ matrix.tier }}) — \`$UNIT_PATH\`"; echo; } > "$RUNNER_TEMP/frag/act-$APP.md"
+
+      # --- guards: everything below needs a live ArgoCD; say so instead of vanishing.
+      - name: ⏭️ no ARGOCD_SERVER — live ${{ inputs.mode }} skipped
+        if: matrix.noop != true && inputs.argocd-server == ''
+        run: |
+          jq -n --arg a "$APP" '{app:$a,status:"skipped-no-argocd",note:"argocd-server unset — render only"}' > "$RUNNER_TEMP/frag/act-$APP.json"
+          echo "⏭️ **Skipped: not configured** — the \`ARGOCD_SERVER\` variable (workflow input \`argocd-server\`) is unset; only the render + rendered diff ran." >> "$RUNNER_TEMP/frag/act-$APP.md"
+          echo "### ⏭️ ${{ inputs.mode }}: \`$APP\` skipped — ARGOCD_SERVER unset" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ⏭️ no Tailscale OAuth secrets — live ${{ inputs.mode }} skipped
+        if: matrix.noop != true && inputs.argocd-server != '' && env.TAILNET != 'true' && env.LIVE == 'true'
+        run: |
+          jq -n --arg a "$APP" '{app:$a,status:"skipped-no-tailnet",note:"TS_OAUTH_CLIENT_ID/TS_OAUTH_SECRET unset — ArgoCD and Vault are tailnet-only; render only"}' > "$RUNNER_TEMP/frag/act-$APP.json"
+          echo "⏭️ **Skipped: not configured** — the secrets \`TS_OAUTH_CLIENT_ID\`/\`TS_OAUTH_SECRET\` are unset, and ArgoCD + Vault are tailnet-only; only the render + rendered diff ran." >> "$RUNNER_TEMP/frag/act-$APP.md"
+          echo "### ⏭️ ${{ inputs.mode }}: \`$APP\` skipped — no Tailscale OAuth secrets" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ⏭️ external source / render-only — nothing to ${{ inputs.mode }}
+        if: matrix.noop != true && inputs.argocd-server != '' && env.LIVE != 'true'
+        run: |
+          if [ "${{ matrix.local }}" = "false" ]; then
+            st=external; msg="ℹ️ **Skipped.** \`$APP\` renders \`$UNIT_PATH\` from another repository; this change only touched its ArgoCD wiring. The live state appears in ArgoCD after merge (\`argocd app diff $APP\`)."
+          elif [ "${{ matrix.multi_source }}" = "true" ]; then
+            st=render-only; msg="ℹ️ **Render-only (multi-source).** \`$APP\` is a multi-source Application (OCI/HTTP chart + \`\$values\` + git path), which a single \`--revision\` diff cannot evaluate — the rendered base-vs-head diff above (\`helm template\` of the chart(s) at the pinned version + the git source) is the signal; the live diff appears in ArgoCD after merge."
+          else
+            st=build-only; msg="ℹ️ **Build-only.** \`$UNIT_PATH\` is a template (excluded by the ApplicationSet's directory generator) — nothing in the cluster renders from it."
+          fi
+          jq -n --arg a "$APP" --arg s "$st" '{app:$a,status:$s,note:""}' > "$RUNNER_TEMP/frag/act-$APP.json"
+          echo "$msg" >> "$RUNNER_TEMP/frag/act-$APP.md"
+          echo "### ℹ️ ${{ inputs.mode }}: \`$APP\` — $st" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        if: inputs.argocd-server != '' && inputs.aws-role-arn != '' && env.LIVE == 'true' && env.TAILNET == 'true' && inputs.mode == 'diff'
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      # Join the tailnet FIRST: both Vault and ArgoCD are tailnet-only.
+      - uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        if: inputs.argocd-server != '' && env.LIVE == 'true' && env.TAILNET == 'true'
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ inputs.tailscale-tags }}
+          args: --accept-routes
+
+      - name: 🔐 ArgoCD token (+ kubeconfig after a merge) from Vault (GitHub OIDC)
+        if: inputs.argocd-server != '' && inputs.vault-addr != '' && env.LIVE == 'true' && env.TAILNET == 'true'
+        id: vault
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-addr }}
+          method: jwt
+          path: ${{ inputs.vault-jwt-path }}
+          role: ${{ inputs.mode == 'diff' && inputs.vault-role-pr || inputs.vault-role-push }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportEnv: false
+          secrets: |
+            ${{ inputs.argocd-token-vault-path }} ${{ inputs.argocd-token-vault-key }} | ARGOCD_AUTH_TOKEN ;
+            ${{ inputs.mode == 'refresh' && inputs.kubeconfig-vault-path != '' && format('{0} {1} | KUBECONFIG_CONTENT ;', inputs.kubeconfig-vault-path, inputs.kubeconfig-vault-key) || '' }}
+
+      - name: 🔐 ArgoCD token (pre-Vault fallback — repo secret)
+        if: inputs.argocd-server != '' && inputs.vault-addr == '' && env.LIVE == 'true' && env.TAILNET == 'true'
+        env:
+          FALLBACK_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          [ -n "$FALLBACK_TOKEN" ] || { echo "::error::neither vault-addr (input) nor ARGOCD_AUTH_TOKEN (secret) is set"; exit 1; }
+          echo "::add-mask::$FALLBACK_TOKEN"
+          echo "ARGOCD_AUTH_TOKEN=$FALLBACK_TOKEN" >> "$GITHUB_ENV"
+
+      - name: 🧰 toolchain (argocd, kubectl, yq)
+        if: inputs.argocd-server != '' && env.LIVE == 'true' && env.TAILNET == 'true'
+        uses: ./.gitops-platform/actions/gitops/toolchain
+        with:
+          tools-image: ${{ inputs.tools-image }}
+          registry-token: ${{ github.token }}
+          tools: argocd kubectl
+          argocd-version: ${{ inputs.argocd-version }}
+          kubectl-version: ${{ inputs.kubectl-version }}
+          yq-version: ${{ inputs.yq-version }}
+
+      # ArgoCD answers a NON-admin account with `PermissionDenied` — not NotFound — for an app
+      # it cannot see. `argocd app list` returns only what the token may read, so "not in the
+      # list" == "not in ArgoCD yet" (pre-bootstrap, or a new ApplicationSet child) and the unit
+      # is 🆕 instead of 💥. `unknown` (the list call itself failed) falls through to the normal
+      # diff so connection/auth errors surface. (`app list -o name` is valid; `app get` has no -o name.)
+      - name: 🔎 Is ${{ matrix.app }} in ArgoCD yet?
+        if: inputs.argocd-server != '' && env.LIVE == 'true' && env.TAILNET == 'true'
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ env.ARGOCD_AUTH_TOKEN || steps.vault.outputs.ARGOCD_AUTH_TOKEN }}
+        run: |
+          set +e
+          apps=$(argocd app list -o name 2>"$RUNNER_TEMP/applist.err"); rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then echo "IN_ARGOCD=unknown" >> "$GITHUB_ENV"; echo "::warning::argocd app list failed (rc=$rc): $(tail -c 300 "$RUNNER_TEMP/applist.err")"; exit 0; fi
+          # `-o name` prints <namespace>/<name>; match the bare name too (older CLIs).
+          if grep -qxE "(argocd/)?$APP" <<<"$apps"; then echo "IN_ARGOCD=true" >> "$GITHUB_ENV"; echo "$APP is in ArgoCD"
+          else echo "IN_ARGOCD=false" >> "$GITHUB_ENV"; echo "$APP is NOT in ArgoCD yet ($(wc -l <<<"$apps") apps visible)"; fi
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.argocd-server != '' && env.LIVE == 'true' && env.TAILNET == 'true' && inputs.mode == 'diff'
+        continue-on-error: true
+        with:
+          name: ${{ env.FRAG_PREFIX }}-render-${{ matrix.app }}
+          path: ${{ runner.temp }}/renderfrag
+
+      - name: 🔍 argocd app diff ${{ matrix.app }}
+        id: diff
+        if: inputs.argocd-server != '' && env.LIVE == 'true' && env.TAILNET == 'true' && inputs.mode == 'diff'
+        uses: ./.gitops-platform/actions/gitops/argocd-diff
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ env.ARGOCD_AUTH_TOKEN || steps.vault.outputs.ARGOCD_AUTH_TOKEN }}
+        with:
+          app: ${{ matrix.app }}
+          path: ${{ matrix.path }}
+          revision: ${{ github.event.pull_request.head.sha || github.sha }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          in-argocd: ${{ env.IN_ARGOCD || 'unknown' }}
+          render-fragment: ${{ runner.temp }}/renderfrag/render-${{ matrix.app }}.json
+          block-noop: ${{ inputs.block-noop }}
+          meta-file-pattern: ${{ inputs.meta-file-pattern }}
+          new-app-hint: ${{ inputs.new-app-hint }}
+          cluster: ${{ inputs.cluster }}
+          artifact-name: argocd-diff-${{ inputs.cluster }}-${{ matrix.app }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.diff.outcome != 'skipped'
+        with:
+          name: argocd-diff-${{ inputs.cluster }}-${{ matrix.app }}
+          path: ${{ runner.temp }}/diff.txt
+          retention-days: 14
+
+      # --- mode=refresh: the merge landed; make ArgoCD pick it up and PROVE it.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.argocd-server != '' && env.LIVE == 'true' && env.TAILNET == 'true' && inputs.mode == 'refresh' && needs.render.result == 'success'
+        continue-on-error: true
+        with:
+          name: rendered-${{ inputs.cluster }}-${{ matrix.app }}
+          path: ${{ runner.temp }}/rendered
+
+      - name: ♻️ Hard-refresh + validate ${{ matrix.app }} (sync.revision == this SHA, Synced, Healthy, rollouts)
+        id: refresh
+        if: inputs.argocd-server != '' && env.LIVE == 'true' && env.TAILNET == 'true' && inputs.mode == 'refresh'
+        uses: ./.gitops-platform/actions/gitops/argocd-refresh
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ env.ARGOCD_AUTH_TOKEN || steps.vault.outputs.ARGOCD_AUTH_TOKEN }}
+        with:
+          app: ${{ matrix.app }}
+          path: ${{ matrix.path }}
+          want-sha: ${{ github.sha }}
+          in-argocd: ${{ env.IN_ARGOCD || 'unknown' }}
+          new-apps-appear-after-merge: ${{ inputs.new-apps-appear-after-merge }}
+          new-app-hint: ${{ inputs.new-app-hint }}
+          kubeconfig-content: ${{ steps.vault.outputs.KUBECONFIG_CONTENT }}
+          kubeconfig-hint: ${{ inputs.kubeconfig-vault-path != '' && format('vault-addr / {0}', inputs.kubeconfig-vault-path) || 'kubeconfig-vault-path unset' }}
+          rendered: ${{ runner.temp }}/rendered/head.yaml
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && matrix.noop != true
+        with:
+          name: ${{ env.FRAG_PREFIX }}-act-${{ matrix.app }}
+          path: ${{ runner.temp }}/frag/
+          retention-days: 3
+
+      - name: 🚧 Enforce (no-op blocks; errors fail)
+        if: matrix.noop != true && steps.diff.outcome != 'skipped'
+        env:
+          STATUS: ${{ steps.diff.outputs.status }}
+        run: |
+          case "$STATUS" in
+            diff|noop-allowed|new|meta|noop-expected|noop-prune-nothing|noop-live-equal) echo "ok: $STATUS for $APP" ;;
+            noop)  echo "::error::no-op change: this PR changes nothing in the live cluster for $APP — blocking merge (set repo var GITOPS_BLOCK_NOOP=false / input block-noop=false to override)"; exit 1 ;;
+            *)     echo "::error::argocd app diff failed for $APP ($STATUS)"; exit 1 ;;
+          esac
+
+  result:
+    name: 📋 result
+    needs: [discover, render, act]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 devsecops-gitops actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.discover.outputs.has_changes == 'true'
+        continue-on-error: true
+        with:
+          pattern: ${{ env.FRAG_PREFIX }}-*
+          merge-multiple: true
+          path: frags
+
+      - name: 📋 Group report (table + components + expected change + live result)
+        id: report
+        uses: ./.gitops-platform/actions/gitops/group-report
+        with:
+          frags-dir: frags
+          cluster: ${{ inputs.cluster }}
+          group: ${{ inputs.group }}
+          mode: ${{ inputs.mode }}
+          run-url: ${{ env.RUN_URL }}
+          units: ${{ needs.discover.outputs.units || '[]' }}
+          out-dir: out
+
+      - name: 📋 Summary + group.json for the gate
+        env:
+          RENDER_RESULT: ${{ needs.render.result }}
+          ACT_RESULT: ${{ needs.act.result }}
+        run: |
+          { cat out/comment.md; echo; echo "<sub>render: $RENDER_RESULT · ${{ inputs.mode }}: $ACT_RESULT</sub>"; } >> "$GITHUB_STEP_SUMMARY"
+          cp out/group.json "out/group-${{ inputs.cluster }}-${{ inputs.group }}.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gitops-group-${{ inputs.cluster }}-${{ inputs.group }}
+          path: out/group-${{ inputs.cluster }}-${{ inputs.group }}.json
+          retention-days: 3
+
+      - name: 💬 Sticky PR comment for the group
+        if: inputs.sticky-comment && inputs.mode == 'diff' && github.event_name == 'pull_request' && needs.discover.outputs.has_changes == 'true'
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: ${{ inputs.comment-header || format('gitops-{0}-{1}', inputs.cluster, inputs.group) }}
+          path: out/comment.md
+
+      - name: 🧹 Remove a stale group comment (nothing changed in this group now)
+        if: inputs.sticky-comment && inputs.mode == 'diff' && github.event_name == 'pull_request' && needs.discover.outputs.has_changes != 'true'
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: ${{ inputs.comment-header || format('gitops-{0}-{1}', inputs.cluster, inputs.group) }}
+          delete: true
+
+      # After a merge: a Deployment for the environment with the units as description, marked
+      # from the validation — the Environments page then shows the latest SHA applied per group.
+      - name: 🚀 GitHub Deployment for ${{ inputs.environment-name || format('{0}-{1}', inputs.cluster, inputs.group) }}
+        if: inputs.mode == 'refresh' && needs.discover.outputs.has_changes == 'true'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          ENV_NAME: ${{ inputs.environment-name || format('{0}-{1}', inputs.cluster, inputs.group) }}
+          ENV_URL: ${{ inputs.argocd-server != '' && format('https://{0}/applications?proj={1}', inputs.argocd-server, inputs.argocd-project || inputs.group) || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          UNITS: ${{ needs.discover.outputs.units }}
+          ACT_RESULT: ${{ needs.act.result }}
+          RENDER_RESULT: ${{ needs.render.result }}
+          ARGOCD_SET: ${{ inputs.argocd-server != '' }}
+        with:
+          script: |
+            const units = JSON.parse(process.env.UNITS || '[]').map(u => u.app);
+            const ok = process.env.ACT_RESULT === 'success' && process.env.RENDER_RESULT === 'success';
+            const validated = process.env.ARGOCD_SET === 'true';
+            const { data: dep } = await github.rest.repos.createDeployment({
+              owner: context.repo.owner, repo: context.repo.repo, ref: context.sha,
+              environment: process.env.ENV_NAME, auto_merge: false, required_contexts: [],
+              description: `GitOps refresh: ${units.join(', ')}`.slice(0, 140),
+              transient_environment: false, production_environment: process.env.ENV_NAME.includes('-prd-'),
+            });
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner, repo: context.repo.repo, deployment_id: dep.id,
+              state: ok ? (validated ? 'success' : 'inactive') : 'failure',
+              log_url: process.env.RUN_URL, environment_url: process.env.ENV_URL,
+              description: ok ? (validated ? `validated: ${units.join(', ')}` : 'refresh skipped: ARGOCD_SERVER not configured') : `validation failed — see ${process.env.RUN_URL}`,
+            });
+            core.summary.addRaw(`\n🚀 Deployment #${dep.id} → environment **${process.env.ENV_NAME}** (${ok ? (validated ? 'success' : 'inactive — not configured') : 'failure'})\n`).write();
+
+      - name: 🚧 Fail the group if any unit failed
+        env:
+          RENDER_RESULT: ${{ needs.render.result }}
+          ACT_RESULT: ${{ needs.act.result }}
+        run: |
+          if [ "$RENDER_RESULT" = failure ] || [ "$RENDER_RESULT" = cancelled ] || [ "$ACT_RESULT" = failure ] || [ "$ACT_RESULT" = cancelled ]; then
+            echo "::error::${{ inputs.group }} · ${{ inputs.cluster }}: render=$RENDER_RESULT ${{ inputs.mode }}=$ACT_RESULT — see the unit jobs above"; exit 1
+          fi
+          echo "${{ inputs.group }} · ${{ inputs.cluster }}: ok (render=$RENDER_RESULT ${{ inputs.mode }}=$ACT_RESULT)"

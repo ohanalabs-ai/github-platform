@@ -1,0 +1,35 @@
+# 🚦 gate-summary — the consolidated summary over every group's group.json: groups → units →
+# objects +~−, ONE Mermaid of changed files → kustomizations → Applications → group → cluster,
+# "Merging this PR will …". See gitops-gate-summary.sh + README.md.
+name: gitops-gate-summary
+description: "Consolidate every group.json into one markdown summary (table, Mermaid, sentences)"
+inputs:
+  groups-dir:
+    description: "Directory holding the downloaded gitops-group-* artifacts (group*.json)"
+    required: true
+  output:
+    description: "Markdown file to write"
+    required: false
+    default: consolidated.md
+  mode:
+    description: "diff | refresh (wording)"
+    required: false
+    default: diff
+outputs:
+  failing:
+    description: "true when a unit failed (render failed, live error, or a blocking noop)"
+    value: ${{ steps.summary.outputs.failing }}
+runs:
+  using: composite
+  steps:
+    - name: 🚦 consolidated summary
+      id: summary
+      shell: bash
+      env:
+        GROUPS: ${{ inputs.groups-dir }}
+        OUTFILE: ${{ inputs.output }}
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -uo pipefail
+        mkdir -p "$GROUPS"
+        if bash "${{ github.action_path }}/gitops-gate-summary.sh" "$GROUPS" "$OUTFILE" "$MODE"; then echo "failing=false" >> "$GITHUB_OUTPUT"; else echo "failing=true" >> "$GITHUB_OUTPUT"; fi

@@ -1,0 +1,49 @@
+# 🌳 kustomize-tree — what a kustomization is made of: an indented dependency tree or a
+# Mermaid graph (kustomization dirs → files / components / bases / Helm charts / patches),
+# with changed files highlighted. See kustomize-tree.sh + README.md.
+name: gitops-kustomize-tree
+description: "Print a kustomization's component tree (indented) or Mermaid graph, highlighting changed files"
+inputs:
+  path:
+    description: "Repo-relative kustomization directory"
+    required: true
+  mermaid:
+    description: "true → a fenced ```mermaid graph instead of the indented tree"
+    required: false
+    default: "false"
+  changed:
+    description: "Comma-separated repo-relative files to highlight"
+    required: false
+    default: ""
+  title:
+    description: "Graph title (Mermaid subgraph label)"
+    required: false
+    default: ""
+  output:
+    description: "File to write to (also printed to the log). Empty → stdout only."
+    required: false
+    default: ""
+  repo-root:
+    description: "Directory the paths are relative to"
+    required: false
+    default: ${{ github.workspace }}
+runs:
+  using: composite
+  steps:
+    - name: 🌳 kustomize tree
+      shell: bash
+      env:
+        GITOPS_REPO_ROOT: ${{ inputs.repo-root }}
+        KT_PATH: ${{ inputs.path }}
+        KT_MERMAID: ${{ inputs.mermaid }}
+        KT_CHANGED: ${{ inputs.changed }}
+        KT_TITLE: ${{ inputs.title }}
+        KT_OUT: ${{ inputs.output }}
+      run: |
+        set -euo pipefail
+        args=("$KT_PATH")
+        [ "$KT_MERMAID" = true ] && args+=(--mermaid)
+        [ -n "$KT_CHANGED" ] && args+=(--changed "$KT_CHANGED")
+        [ -n "$KT_TITLE" ] && args+=(--title "$KT_TITLE")
+        if [ -n "$KT_OUT" ]; then bash "${{ github.action_path }}/kustomize-tree.sh" "${args[@]}" | tee "$KT_OUT"
+        else bash "${{ github.action_path }}/kustomize-tree.sh" "${args[@]}"; fi

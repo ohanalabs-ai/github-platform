@@ -1,0 +1,50 @@
+# 🧭 discover — changed files → this group's ArgoCD Application units, through the
+# CALLER's repo-local discovery command (the unit contract). See discover.sh + README.md.
+name: gitops-discover-units
+description: "Run the caller's discovery command over the changed files and emit the units / matrix / has_changes outputs (+ a step summary)"
+inputs:
+  command:
+    description: "Repo-local command printing {units:[…],unmapped:[…]} — the changed paths are appended as arguments (e.g. `bash clusters/discover-units.sh --json --cluster <c> --group <g>`)"
+    required: true
+  changed-files:
+    description: "Whitespace-separated changed paths (tj-actions/changed-files all_changed_files)"
+    required: false
+    default: ""
+  cluster:
+    description: "For the summary"
+    required: false
+    default: ""
+  group:
+    description: "For the summary"
+    required: false
+    default: ""
+  mode:
+    description: "diff | refresh (for the summary)"
+    required: false
+    default: diff
+outputs:
+  units:
+    description: "JSON array of units (may be empty)"
+    value: ${{ steps.discover.outputs.units }}
+  count:
+    description: "Number of units"
+    value: ${{ steps.discover.outputs.count }}
+  has_changes:
+    description: "true when at least one unit"
+    value: ${{ steps.discover.outputs.has_changes }}
+  matrix:
+    description: "The units, or one `(no units)` placeholder row (noop: true) so a matrix job never shows an unexpanded name"
+    value: ${{ steps.discover.outputs.matrix }}
+runs:
+  using: composite
+  steps:
+    - name: 🧭 changed paths → units
+      id: discover
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        CHANGED: ${{ inputs.changed-files }}
+        CLUSTER: ${{ inputs.cluster }}
+        GROUP: ${{ inputs.group }}
+        MODE: ${{ inputs.mode }}
+      run: bash "${{ github.action_path }}/discover.sh"
