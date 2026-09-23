@@ -61,8 +61,12 @@ mkdir -p "$out/head-objs" "$out/base-objs"
 abs() { (cd "$1" 2>/dev/null && pwd); }
 
 # every CHANGE_ME_* token in the tree → "CHANGE_ME_X=ci-placeholder-x …"
+# (grep from INSIDE the tree with `.`: GNU grep applies --exclude-dir to a command-line
+# directory argument too, so `grep -r … /path/.gitops-base --exclude-dir='.gitops-*'`
+# would silently scan nothing — the base tree then rendered with NO placeholders and the
+# plugin failed with "unresolved CHANGE_ME_*", turning every plugin unit into `new`)
 placeholder_env() { # <tree>
-  grep -rhoE 'CHANGE_ME_[A-Z0-9_]+' "$1" --exclude-dir=.git --exclude-dir='.gitops-*' --exclude-dir=charts 2>/dev/null | sort -u \
+  ( cd "$1" && grep -rhoE 'CHANGE_ME_[A-Z0-9_]+' . --exclude-dir=.git --exclude-dir='.gitops-*' --exclude-dir=charts 2>/dev/null ) | sort -u \
     | while IFS= read -r t; do lc=$(printf '%s' "${t#CHANGE_ME_}" | tr 'A-Z_' 'a-z-'); printf '%s=ci-placeholder-%s ' "$t" "$lc"; done
 }
 placeholder_value() { # CHANGE_ME_X → ci-placeholder-x ; anything else unchanged

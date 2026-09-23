@@ -401,12 +401,21 @@ jobs:
       APP: ${{ matrix.app }}
       UNIT_PATH: ${{ matrix.path }}
       LIVE: ${{ matrix.noop != true && matrix.local == true && (inputs.mode == 'refresh' || matrix.render_only == false) }}
-      # both ArgoCD and Vault are tailnet-only: without the Tailscale OAuth client the live step is impossible
-      TAILNET: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '' }}
     steps:
       - name: ⏭️ no units in this group
         if: matrix.noop == true
         run: echo "nothing in ${{ inputs.group }} · ${{ inputs.cluster }} changed — nothing to ${{ inputs.mode }}"
+
+      # Both ArgoCD and Vault are tailnet-only: without the Tailscale OAuth client the live step
+      # is impossible. Decided in a STEP, not the job-level `env:` — in a reusable workflow the
+      # `secrets` context evaluated at job level came out EMPTY for inherited organization
+      # secrets (seen live 2026-09-23: every unit read "skipped (no Tailscale OAuth secrets)"
+      # while the caller had them); at step level the same expression sees them.
+      - name: 🔎 Tailscale OAuth secrets present?
+        if: matrix.noop != true
+        env:
+          HAS_TAILNET: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '' }}
+        run: echo "TAILNET=$HAS_TAILNET" >> "$GITHUB_ENV"; echo "tailnet secrets present: $HAS_TAILNET"
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         if: matrix.noop != true

@@ -38,6 +38,29 @@ check "changed object is the Deployment" "[ \"\$(jqv $out/summary.json '.objects
 out="$W/rd-new"; bash "$A/render-diff/render-diff.sh" "$F/kustomize/head" - app "$out" >/dev/null 2>&1
 check "no base → new" "[ \"\$(jqv $out/summary.json .new)\" = true ] && [ \"\$(jqv $out/summary.json .base)\" = absent ]"
 
+echo "== render/plugin (placeholders reach the render plugin in BOTH trees, incl. a tree named .gitops-base)"
+# a fake render plugin: the CMP contract (cwd = the unit path, ARGOCD_APP_SOURCE_PATH set) — it
+# fails like the real one when a CHANGE_ME_* token has no env var, else substitutes and builds
+mkdir -p "$W/plugin/head/app" "$W/plugin/.gitops-base/app" "$W/plugin/head/cmp" "$W/plugin/.gitops-base/cmp"
+for t in head .gitops-base; do
+  cp "$F/kustomize/head/app/"* "$W/plugin/$t/app/"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: tokens\ndata:\n  cluster: CHANGE_ME_CLUSTER_NAME\n  tree: %s\n' "$t" > "$W/plugin/$t/app/tokens.yaml"
+  echo "  - tokens.yaml" >> "$W/plugin/$t/app/kustomization.yaml"
+  cat > "$W/plugin/$t/cmp/render.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ -n "${CHANGE_ME_CLUSTER_NAME:-}" ] || { echo "render-kustomize: unresolved CHANGE_ME_* token(s): CHANGE_ME_CLUSTER_NAME" >&2; exit 1; }
+kustomize build . | sed "s/CHANGE_ME_CLUSTER_NAME/$CHANGE_ME_CLUSTER_NAME/g"
+EOF
+  chmod +x "$W/plugin/$t/cmp/render.sh"
+done
+out="$W/rd-plugin"
+RENDER_PLUGIN=true RENDER_PLUGIN_SCRIPT=cmp/render.sh bash "$A/render-diff/render-diff.sh" "$W/plugin/head" "$W/plugin/.gitops-base" app "$out" > "$W/rd-plugin.log" 2>"$W/rd-plugin.err"
+check "render_mode plugin" "[ \"\$(jqv $out/summary.json .render_mode)\" = plugin ]"
+check "base tree named .gitops-base rendered (not 'new')" "[ \"\$(jqv $out/summary.json .new)\" = false ] && [ \"\$(jqv $out/summary.json .base)\" = ok ]"
+check "placeholder substituted in the render" "grep -q 'cluster: ci-placeholder-cluster-name' $out/head.yaml"
+check "+0 ~1 -0 (only the tree marker differs)" "[ \"\$(jqv $out/summary.json '\"\\(.added) \\(.changed) \\(.removed)\"')\" = '0 1 0' ]"
+
 if [ "$ONLINE" = true ]; then
   echo "== render/multi-source (helm template, chart bump)"
   out="$W/rd-ms"
