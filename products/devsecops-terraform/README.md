@@ -1,6 +1,6 @@
 # devsecops-terraform
 
-Reusable workflow: [`terraform-devsecops-workflow.yaml`](../../.github/workflows/terraform-devsecops-workflow.yaml) — Terraform lint/validate, an optional shift-left security scan (tfsec + terrascan), a `plan` step that comments its result directly on the PR, and an environment-gated `apply`.
+Reusable workflow: [`terraform-devsecops-workflow.yaml`](../../.github/workflows/terraform-devsecops-workflow.yaml) — Terraform lint/validate, an optional shift-left security scan (tfsec + terrascan), a `plan` step that comments its result directly on the PR, and an environment-gated `apply`. Authenticates keylessly to **AWS** (`aws-role-arn`, GitHub OIDC → IAM role) **or** to **Google Cloud** (`gcp-workload-identity-provider` + `gcp-service-account`, GitHub OIDC → Workload Identity Federation) — one cloud identity per call.
 
 This is a reviewed, genericized copy of `vionix-proj/vionix-github`'s `.github/workflows/terraform-devsecops-workflow.yaml`. See the header comment in the workflow file itself for the full list of what changed from the original and why (short version: dropped Viasat-internal Artifactory/`config-stream-decoder`/self-hosted-runner dependencies in favor of standard AWS OIDC + `hashicorp/setup-terraform`, so any repo with a `terraform/` directory can call this — no docker-compose contract required).
 
@@ -64,7 +64,11 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `var-file` | `""` | Path (relative to `working-directory`) to a `.tfvars` file |
 | `extra-args` | `""` | Extra space-separated flags appended to `plan`/`apply` (e.g. `-var=...`) |
 | `aws-region` | `""` | AWS region for OIDC auth |
-| `aws-role-arn` | `""` | IAM role ARN to assume via GitHub OIDC. Leave both this and `aws-region` empty to skip AWS auth entirely (e.g. a non-AWS backend) |
+| `aws-role-arn` | `""` | IAM role ARN to assume via GitHub OIDC. Leave both this and `aws-region` empty to skip AWS auth entirely (e.g. a non-AWS backend). Mutually exclusive with `gcp-workload-identity-provider` |
+| `gcp-workload-identity-provider` | `""` | Full resource name of the Google Cloud Workload Identity Provider (`projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`) the job's GitHub OIDC token is federated into (`google-github-actions/auth`, no key). Set together with `gcp-service-account`; leave both empty to skip GCP auth. Mutually exclusive with `aws-role-arn` — `validate-inputs` fails fast |
+| `gcp-service-account` | `""` | Email of the Google Cloud service account to impersonate (it grants `roles/iam.workloadIdentityUser` to the federated principal — e.g. `principalSet://…/attribute.repository/<owner>/<repo>`) |
+| `gcp-project-id` | `""` | Optional default project: passed to the auth action (`GOOGLE_CLOUD_PROJECT`, `CLOUDSDK_CORE_PROJECT`) **and** exported as `GOOGLE_CLOUD_QUOTA_PROJECT` — the project API calls are billed/quota-checked against (a federated credential carries none; a GCS state bucket outside the service account's own project may 403 without it; the service account needs `roles/serviceusage.serviceUsageConsumer` there). Only read with GCP auth |
+| `run-plan` | `true` | `false` = lint/validate only: `plan` is skipped and so are `deploy`/`destroy` (they `need` it). For a root whose CI identity does not exist yet — its first apply is the laptop bootstrap that creates the identity this workflow would federate into — so the PR adding the root still goes green |
 | `enable-shift-left-scan` | `false` | Run the tfsec/terrascan matrix job |
 | `terrascan-config-path` | `terrascan-config.toml` | Path to terrascan's config file, only read when `enable-shift-left-scan` is true |
 | `terraform-environment-name` | `default` | GitHub Environment the `deploy` job runs under — use this for required-reviewer apply gating |
@@ -98,6 +102,26 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
         }
 ```
 
+### Google Cloud instead of AWS
+
+The same call shape, with the GCP inputs in place of the AWS ones (never both):
+
+```yaml
+    with:
+      working-directory: cloud/google-gcp/agent-snapshots/terraform   # the root's backend "gcs" block is complete
+      gcp-workload-identity-provider: ${{ vars.CLOUD_GOOGLE_GCP_AGENT_SNAPSHOTS_WORKLOAD_IDENTITY_PROVIDER }}
+      gcp-service-account: ${{ vars.CLOUD_GOOGLE_GCP_AGENT_SNAPSHOTS_SERVICE_ACCOUNT }}
+      gcp-project-id: ${{ vars.CLOUD_GOOGLE_GCP_AGENT_SNAPSHOTS_PROJECT_ID }}
+      extra-args: ${{ vars.CLOUD_GOOGLE_GCP_AGENT_SNAPSHOTS_TF_EXTRA_ARGS }}   # -var=… for variables without a default
+      run-plan: true          # false until the root's laptop bootstrap has created the identity above
+```
+
+A caller with several roots runs ONE job with `strategy.matrix` over them and a `uses:`
+of this workflow — GitHub allows a matrix on a reusable-workflow job, and `matrix.*` is
+available in `with:` — rather than one workflow file per root (see
+`planeodev/planeo-infra`'s `.github/workflows/cloud-roots.yml`). Required status names
+then read `<caller job name> / 📝️ plan`, one per leg.
+
 ### Secrets from Vault instead of GitHub (recommended when you run Vault)
 
 `extra-env-json` copies secret *values* into the caller's GitHub secrets — a second
@@ -126,10 +150,10 @@ Job-level `id-token: write` is already declared on every terraform job.
 
 ## Jobs
 
-- **🔍 validate-inputs** — fails fast with a clear `::error` if `aws-region`/`aws-role-arn` are inconsistently set (one provided without the other), or if `enable-shift-left-scan` is true with an empty `terrascan-config-path`. Every other job depends on this passing first.
+- **🔍 validate-inputs** — fails fast with a clear `::error` if `aws-region`/`aws-role-arn` or `gcp-workload-identity-provider`/`gcp-service-account` are inconsistently set (one provided without the other), if AWS **and** GCP auth are both requested, if `gcp-project-id` is set without GCP auth, or if `enable-shift-left-scan` is true with an empty `terrascan-config-path`. Every other job depends on this passing first.
 - **🚨 lint** — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`. Runs with no AWS credentials at all.
 - **🛡️️ check** *(opt-in via `enable-shift-left-scan`)* — tfsec (PR-comment) and terrascan (SARIF upload to the Security tab) in a matrix.
-- **📝️ plan** — real `terraform init`/`plan` against the configured backend, rendered as a sticky PR comment and appended to the job summary.
+- **📝️ plan** — real `terraform init`/`plan` against the configured backend (after the AWS or GCP OIDC login), rendered as a sticky PR comment and appended to the job summary. Skipped entirely when `run-plan` is `false` (and `deploy`/`destroy` with it).
 - **🚀 deploy** — `terraform apply -auto-approve`, gated behind the named GitHub Environment (configure required reviewers there for manual approval before this job runs). Set `agent-validated: true` to point it at `<terraform-environment-name>-unattended` instead, skipping that pause.
 - **🧨 destroy** *(opt-in via `run-destroy`)* — `terraform destroy -auto-approve`, gated the same way as `deploy` (same Environment, same required-reviewer pause, same `agent-validated` mechanism). Mutually exclusive with `run-deploy`.
 
@@ -138,6 +162,7 @@ Job-level `id-token: write` is already declared on every terraform job.
 1. A `terraform/` (or equivalent, via `working-directory`) directory with a valid root module.
 2. If using a remote backend, the actual bucket/table already provisioned (e.g. via a one-time bootstrap stack) — this workflow does not create them.
 3. If using AWS: an IAM role trusting this repo's GitHub OIDC provider (`token.actions.githubusercontent.com`), passed as `aws-role-arn`.
+   If using Google Cloud: a Workload Identity **pool + provider** whose `issuer_uri` is `https://token.actions.githubusercontent.com` with an **attribute condition** on `assertion.repository` (Google refuses a GitHub-issuer provider without one), and a service account granting `roles/iam.workloadIdentityUser` to `principalSet://iam.googleapis.com/<pool>/attribute.repository/<owner>/<repo>` — passed as `gcp-workload-identity-provider` / `gcp-service-account`. Chicken-and-egg: CI cannot create the identity it runs as, so the root that creates them is applied once from a laptop; call this workflow with `run-plan: false` until then.
 4. If using `enable-shift-left-scan: true` with terrascan: a `terrascan-config.toml` at the repo root.
 
 ## Required GitHub repository settings — read this before your first deploy/destroy run
