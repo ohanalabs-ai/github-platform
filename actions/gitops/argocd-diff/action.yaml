@@ -1,0 +1,92 @@
+# 🔍 argocd-diff — `argocd app diff <app> --revision <PR head>` against the live cluster and
+# the VERDICT (diff | noop | noop-allowed | noop-expected | noop-prune-nothing | noop-live-equal |
+# meta | new | error), with the 3× cache-miss retry. Needs `argocd` on PATH (toolchain) and
+# ARGOCD_SERVER / ARGOCD_AUTH_TOKEN / ARGOCD_OPTS in the environment. See argocd-diff.sh + README.md.
+name: gitops-argocd-diff
+description: "Live `argocd app diff --revision` of one unit and its verdict, written as the act fragment"
+inputs:
+  app:
+    description: "Application name"
+    required: true
+  path:
+    description: "The unit's git source path (for the `meta` rule and the text)"
+    required: false
+    default: ""
+  revision:
+    description: "The commit the repo-server renders (pull_request.head.sha)"
+    required: true
+  base-sha:
+    description: "The PR base sha (for the `meta` rule); empty disables it"
+    required: false
+    default: ""
+  in-argocd:
+    description: "true | false | unknown — whether `argocd app list` shows the app (false → `new`)"
+    required: false
+    default: unknown
+  render-fragment:
+    description: "Path of this unit's render-<app>.json (decides noop-expected / noop-prune-nothing / noop-live-equal)"
+    required: false
+    default: ""
+  block-noop:
+    description: "false → a live no-op is `noop-allowed` (warning) instead of `noop` (blocked)"
+    required: false
+    default: "true"
+  meta-file-pattern:
+    description: "ERE of files under the unit that never reach a rendered manifest"
+    required: false
+    default: '(^|/)\.render-kustomize$|\.md$'
+  new-app-hint:
+    description: "Sentence fragment explaining who creates an Application that is not in ArgoCD yet"
+    required: false
+    default: "it is created after merge (bootstrap or ApplicationSet)"
+  cluster:
+    description: "For the text"
+    required: false
+    default: ""
+  artifact-name:
+    description: "Name of the raw-diff artifact (for the truncation note)"
+    required: false
+    default: ""
+  frag-dir:
+    description: "Where act-<app>.json/.md go"
+    required: false
+    default: ${{ runner.temp }}/frag
+  diff-output:
+    description: "Where the raw argocd output goes"
+    required: false
+    default: ${{ runner.temp }}/diff.txt
+  retries:
+    description: "Attempts on a managed-resources cache miss"
+    required: false
+    default: "3"
+  retry-sleep:
+    description: "Seconds between attempts"
+    required: false
+    default: "25"
+outputs:
+  status:
+    description: "The verdict"
+    value: ${{ steps.diff.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - name: 🔍 argocd app diff → verdict
+      id: diff
+      shell: bash
+      env:
+        APP: ${{ inputs.app }}
+        UNIT_PATH: ${{ inputs.path }}
+        DIFF_REV: ${{ inputs.revision }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        IN_ARGOCD: ${{ inputs.in-argocd }}
+        RENDER_FRAG: ${{ inputs.render-fragment }}
+        BLOCK_NOOP: ${{ inputs.block-noop }}
+        META_PATTERN: ${{ inputs.meta-file-pattern }}
+        NEW_APP_HINT: ${{ inputs.new-app-hint }}
+        CLUSTER: ${{ inputs.cluster }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name || format('argocd-diff-{0}', inputs.app) }}
+        FRAG_DIR: ${{ inputs.frag-dir }}
+        DIFF_OUT: ${{ inputs.diff-output }}
+        RETRIES: ${{ inputs.retries }}
+        RETRY_SLEEP: ${{ inputs.retry-sleep }}
+      run: bash "${{ github.action_path }}/argocd-diff.sh"

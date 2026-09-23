@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vault-operator
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: ghcr.io/bank-vaults/helm-charts
+      chart: vault-operator
+      targetRevision: 1.24.0
+      helm:
+        releaseName: vault-operator
+        valueFiles:
+          - $values/charts/vault-operator/values.yaml
+        parameters:
+          - name: podAnnotations.planeo\.dev/region
+            value: CHANGE_ME_AWS_REGION
+    - repoURL: git@github.com:example/fixtures.git
+      targetRevision: main
+      ref: values
+      path: overlay
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vault

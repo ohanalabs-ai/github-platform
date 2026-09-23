@@ -1,0 +1,123 @@
+# 🧩 render — the rendered base-vs-head diff of ONE unit (kustomize, a render plugin, or
+# `helm template` + kustomize for a multi-source Application), its component tree and
+# Mermaid, written as fragments for the 📋 result job. See render-diff.sh / render-unit.sh.
+name: gitops-render-diff
+description: "Render one ArgoCD unit in the head and base trees, diff per object, write the render fragments + step summary"
+inputs:
+  app:
+    description: "Application name"
+    required: true
+  path:
+    description: "The unit's git source path (repo-relative)"
+    required: true
+  tier:
+    description: "Display column"
+    required: false
+    default: "-"
+  cluster:
+    description: "Display column / titles"
+    required: false
+    default: ""
+  local:
+    description: "false → the path is another repository: listed, not rendered"
+    required: false
+    default: "true"
+  multi-source:
+    description: "true → spec.sources[]: `helm template` every chart source (needs manifest) + build the git source"
+    required: false
+    default: "false"
+  render-only:
+    description: "informational (the live step decides from it)"
+    required: false
+    default: "false"
+  plugin:
+    description: "true → render with render-plugin-script and placeholder CHANGE_ME_* values"
+    required: false
+    default: "false"
+  manifest:
+    description: "Repo-relative path of the Application manifest (multi-source render)"
+    required: false
+    default: ""
+  feeds:
+    description: "ERE of repo paths that feed this unit's render (default ^<path>(/|$)) — highlight + report"
+    required: false
+    default: ""
+  changed-files:
+    description: "The change's files, whitespace-separated"
+    required: false
+    default: ""
+  base-tree:
+    description: "Directory holding the PR base checkout, or `-`"
+    required: false
+    default: "-"
+  render-plugin-script:
+    description: "Repo-relative CMP script (e.g. addons/platform/argocd/cmp/render.sh)"
+    required: false
+    default: ""
+  kustomize-build-args:
+    description: "Flags after `kustomize build`"
+    required: false
+    default: "--enable-helm"
+  helm-kube-version:
+    description: "--kube-version for `helm template` (multi-source)"
+    required: false
+    default: "1.33.0"
+  planeo-labels:
+    description: "k=v,k=v passed to the render plugin as PLANEO_LABELS"
+    required: false
+    default: ""
+  attestation-command:
+    description: "Optional `<cmd> <unit-path>` printing `attested: N/M` (WARN phase; never fails the render)"
+    required: false
+    default: ""
+  frag-dir:
+    description: "Where the fragments go"
+    required: false
+    default: ${{ runner.temp }}/frag
+  scratch-dir:
+    description: "Render scratch dir (head.yaml, diff.txt, summary.json)"
+    required: false
+    default: ${{ runner.temp }}/rd
+  artifact-prefix:
+    description: "Prefix of the rendered/rendered-diff artifacts, for the text"
+    required: false
+    default: rendered
+outputs:
+  rendered:
+    description: "Path of head.yaml ('' when not rendered)"
+    value: ${{ steps.render.outputs.rendered }}
+  difftxt:
+    description: "Path of diff.txt ('' when not rendered)"
+    value: ${{ steps.render.outputs.difftxt }}
+  result:
+    description: "ok | failed | external"
+    value: ${{ steps.render.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - name: 🧩 render head + base → expected change, components, Mermaid
+      id: render
+      shell: bash
+      env:
+        APP: ${{ inputs.app }}
+        UNIT_PATH: ${{ inputs.path }}
+        TIER: ${{ inputs.tier }}
+        CLUSTER: ${{ inputs.cluster }}
+        LOCAL: ${{ inputs.local }}
+        MULTI_SOURCE: ${{ inputs.multi-source }}
+        RENDER_ONLY: ${{ inputs.render-only }}
+        PLUGIN: ${{ inputs.plugin }}
+        MANIFEST: ${{ inputs.manifest }}
+        FEEDS: ${{ inputs.feeds }}
+        CHANGED: ${{ inputs.changed-files }}
+        BASE_TREE: ${{ inputs.base-tree }}
+        RENDER_PLUGIN_SCRIPT: ${{ inputs.render-plugin-script }}
+        KUSTOMIZE_BUILD_ARGS: ${{ inputs.kustomize-build-args }}
+        HELM_KUBE_VERSION: ${{ inputs.helm-kube-version }}
+        PLANEO_LABELS: ${{ inputs.planeo-labels }}
+        ATTESTATION_COMMAND: ${{ inputs.attestation-command }}
+        FRAG_DIR: ${{ inputs.frag-dir }}
+        RD_DIR: ${{ inputs.scratch-dir }}
+        ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+        ACTION_DIR: ${{ github.action_path }}
+      run: bash "${{ github.action_path }}/render-unit.sh"

@@ -1,0 +1,106 @@
+# 🚦 Reusable gate for a GitOps caller workflow — devsecops-gitops (products/devsecops-gitops).
+# ONE job that aggregates the caller's group jobs (`results-json: ${{ toJson(needs) }}`),
+# writes a results table plus the consolidated summary from every group's `gitops-group-*`
+# artifact (groups → units → objects +~−, one Mermaid, "Merging this PR will …" —
+# actions/gitops/gate-summary), posted as ONE sticky PR comment per caller (header
+# gitops-gate-<title>). Fails if any group failed or was cancelled.
+#
+# Required statuses are the CALLER job names nested with this job's name:
+#   "🚦 platform gate / 🚦 gate", "🚦 demos gate / 🚦 gate", "🚦 vault gate / 🚦 gate", …
+# The caller jobs MUST be named distinctly: if every caller used the same "🚦 gate", GitHub
+# would see one status name reported by several workflows — a pass from one could overwrite
+# a failure from another (last report wins per context name) and branch protection would let
+# the failing scope through. A caller job that `uses:` a reusable workflow has no check of its
+# own — only the nested jobs do — so the groups themselves cannot be required; require the gate.
+name: 🚦 gitops-argocd-gate
+run-name: "🚦 GitOps ${{ inputs.mode }} gate — ${{ inputs.title }}"
+
+on:
+  workflow_call:
+    inputs:
+      results-json:
+        description: "the caller's `toJson(needs)` — every group job's result"
+        type: string
+        required: true
+      title:
+        description: "scope shown in the summary and the sticky comment header (Platform | Demos | Vault | Sync | Customers)"
+        type: string
+        required: false
+        default: GitOps
+      comment:
+        description: "post the consolidated summary as a sticky PR comment (pull_request events only)"
+        type: boolean
+        required: false
+        default: true
+      mode:
+        description: "diff (pull request) | refresh (post-merge) — wording of the consolidated summary"
+        type: string
+        required: false
+        default: diff
+
+jobs:
+  gate:
+    name: 🚦 gate
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 devsecops-gitops actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .gitops-platform
+
+      # every group's 📋 result uploads group-<cluster>-<group>.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          pattern: gitops-group-*
+          merge-multiple: true
+          path: groups
+
+      - name: 🚦 consolidated summary over the groups
+        id: consolidated
+        uses: ./.gitops-platform/actions/gitops/gate-summary
+        with:
+          groups-dir: groups
+          output: consolidated.md
+          mode: ${{ inputs.mode }}
+
+      - name: 📋 Aggregate the groups
+        id: agg
+        env:
+          RESULTS: ${{ inputs.results-json }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          set -uo pipefail
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          {
+            echo "## 🚦 $TITLE gate"; echo; echo "| group | result |"; echo "|---|---|"
+            echo "$RESULTS" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
+            echo
+            cat consolidated.md
+          } > gate.md
+          cat gate.md >> "$GITHUB_STEP_SUMMARY"
+          if echo "$RESULTS" | jq -e '[.[] | .result] | any(. == "failure" or . == "cancelled")' >/dev/null; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 💬 Sticky PR comment (one per caller)
+        if: inputs.comment && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: gitops-gate-${{ inputs.title }}
+          path: gate.md
+
+      - name: 🚧 Fail if any group failed or was cancelled
+        env:
+          FAILED: ${{ steps.agg.outputs.failed }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          if [ "$FAILED" = "true" ]; then
+            echo "::error::a $TITLE GitOps group failed — open that group's 📋 result and its PR comment"; exit 1
+          fi
+          echo "all $TITLE groups green (a group with 0 units is a pass)"

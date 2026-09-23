@@ -1,0 +1,53 @@
+# 🧰 GitOps toolchain — kustomize / helm / argocd / kubectl / yq on PATH, from pinned
+# releases OR as shims over the caller's own tools image. See install.sh + README.md.
+name: gitops-toolchain
+description: "Put kustomize, helm, argocd, kubectl and yq on PATH — pinned releases, or thin `docker run` shims over the caller's tools image"
+inputs:
+  tools-image:
+    description: "Container image that ships the tools (e.g. ghcr.io/<org>/<repo>/tools:latest). Empty → install pinned releases."
+    required: false
+    default: ""
+  registry-token:
+    description: "Token to `docker login` the image's registry (ghcr.io: the job's GITHUB_TOKEN); ignored without tools-image"
+    required: false
+    default: ""
+  tools:
+    description: "Space-separated tools to provide (subset of: kustomize helm argocd kubectl)"
+    required: false
+    default: "kustomize helm argocd kubectl"
+  kustomize-version:
+    description: "kustomize release (no tools-image)"
+    required: false
+    default: "5.8.1"
+  helm-version:
+    description: "helm release (no tools-image)"
+    required: false
+    default: "3.16.3"
+  argocd-version:
+    description: "argocd CLI release (no tools-image)"
+    required: false
+    default: "3.5.3"
+  kubectl-version:
+    description: "kubectl release (no tools-image)"
+    required: false
+    default: "1.36.2"
+  yq-version:
+    description: "yq (mikefarah) release — always a native binary"
+    required: false
+    default: "4.45.1"
+runs:
+  using: composite
+  steps:
+    - name: 🧰 toolchain
+      shell: bash
+      env:
+        TOOLS_IMAGE: ${{ inputs.tools-image }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        REGISTRY_USER: ${{ github.actor }}
+        TOOLS: ${{ inputs.tools }}
+        KUSTOMIZE_VERSION: ${{ inputs.kustomize-version }}
+        HELM_VERSION: ${{ inputs.helm-version }}
+        ARGOCD_VERSION: ${{ inputs.argocd-version }}
+        KUBECTL_VERSION: ${{ inputs.kubectl-version }}
+        YQ_VERSION: ${{ inputs.yq-version }}
+      run: bash "${{ github.action_path }}/install.sh"

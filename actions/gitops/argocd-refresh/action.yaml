@@ -1,0 +1,67 @@
+# ♻️ argocd-refresh — post-merge hard-refresh + validation of one unit (sync.revision ==
+# the merged SHA, Synced, Healthy; multi-source revisions[]; optional kubectl cross-check
+# with a read-only kubeconfig + rollout status of every workload the unit renders).
+# Needs `argocd` (+ `kubectl`, `yq`) on PATH and ARGOCD_* in the environment. See argocd-refresh.sh.
+name: gitops-argocd-refresh
+description: "Hard-refresh one Application and prove the merged SHA is live (Synced + Healthy, optional in-cluster cross-check)"
+inputs:
+  app:
+    description: "Application name"
+    required: true
+  path:
+    description: "The unit's git source path (for the text)"
+    required: false
+    default: ""
+  want-sha:
+    description: "The merged commit ArgoCD must report"
+    required: true
+  in-argocd:
+    description: "true | false | unknown"
+    required: false
+    default: unknown
+  new-apps-appear-after-merge:
+    description: "true → an Application not in ArgoCD yet is created BY the merge (ApplicationSet): poll for it; false → report `new`"
+    required: false
+    default: "false"
+  new-app-hint:
+    description: "Text for the `new` verdict"
+    required: false
+    default: "it is created by the bootstrap"
+  kubeconfig-content:
+    description: "Optional read-only kubeconfig (from Vault) for the in-cluster cross-check"
+    required: false
+    default: ""
+  kubeconfig-hint:
+    description: "Text shown when no kubeconfig is configured"
+    required: false
+    default: "kubeconfig-vault-path not configured"
+  rendered:
+    description: "The unit's rendered head.yaml (rollouts to wait for); optional"
+    required: false
+    default: ""
+  timeout:
+    description: "Seconds to wait for Synced + Healthy at the SHA"
+    required: false
+    default: "900"
+  frag-dir:
+    description: "Where act-<app>.json/.md go"
+    required: false
+    default: ${{ runner.temp }}/frag
+runs:
+  using: composite
+  steps:
+    - name: ♻️ hard-refresh + validate
+      shell: bash
+      env:
+        APP: ${{ inputs.app }}
+        UNIT_PATH: ${{ inputs.path }}
+        WANT: ${{ inputs.want-sha }}
+        IN_ARGOCD: ${{ inputs.in-argocd }}
+        NEW_APPS_APPEAR_AFTER_MERGE: ${{ inputs.new-apps-appear-after-merge }}
+        NEW_APP_HINT: ${{ inputs.new-app-hint }}
+        KUBECONFIG_CONTENT: ${{ inputs.kubeconfig-content }}
+        KUBECONFIG_HINT: ${{ inputs.kubeconfig-hint }}
+        RENDERED: ${{ inputs.rendered }}
+        TIMEOUT: ${{ inputs.timeout }}
+        FRAG_DIR: ${{ inputs.frag-dir }}
+      run: bash "${{ github.action_path }}/argocd-refresh.sh"

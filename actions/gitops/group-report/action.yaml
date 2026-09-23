@@ -1,0 +1,54 @@
+# 📋 group-report — ONE group's report from the per-unit fragments: comment.md (the sticky
+# PR comment / job summary: table unit | objects | expected change | live verdict, per-unit
+# details collapsed) and group.json for the gate. See gitops-group-report.sh + README.md.
+name: gitops-group-report
+description: "Merge the render/act fragments of a group into comment.md + group.json"
+inputs:
+  frags-dir:
+    description: "Directory with render-<app>.json/.md and act-<app>.json/.md"
+    required: true
+  cluster:
+    description: "Cluster name"
+    required: true
+  group:
+    description: "Group name"
+    required: true
+  mode:
+    description: "diff | refresh"
+    required: true
+  run-url:
+    description: "Link for the run column"
+    required: true
+  units:
+    description: "The discover units JSON array"
+    required: true
+  out-dir:
+    description: "Receives comment.md and group.json"
+    required: false
+    default: out
+outputs:
+  comment:
+    description: "Path of comment.md"
+    value: ${{ steps.report.outputs.comment }}
+  group-json:
+    description: "Path of group.json"
+    value: ${{ steps.report.outputs.group_json }}
+runs:
+  using: composite
+  steps:
+    - name: 📋 group report
+      id: report
+      shell: bash
+      env:
+        FRAGS: ${{ inputs.frags-dir }}
+        CLUSTER: ${{ inputs.cluster }}
+        GROUP: ${{ inputs.group }}
+        MODE: ${{ inputs.mode }}
+        RUN_URL: ${{ inputs.run-url }}
+        UNITS: ${{ inputs.units }}
+        OUT: ${{ inputs.out-dir }}
+      run: |
+        set -uo pipefail
+        mkdir -p "$FRAGS" "$OUT"
+        bash "${{ github.action_path }}/gitops-group-report.sh" "$FRAGS" "$CLUSTER" "$GROUP" "$MODE" "$RUN_URL" "${UNITS:-[]}" "$OUT"
+        { echo "comment=$OUT/comment.md"; echo "group_json=$OUT/group.json"; } >> "$GITHUB_OUTPUT"
