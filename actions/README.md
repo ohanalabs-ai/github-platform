@@ -5,6 +5,7 @@ Composite actions (`actions/<category>/<name>/action.yaml` + the script it runs 
 | Category | Action | Used by |
 |---|---|---|
 | `gitops/` | [`toolchain`](gitops/toolchain/) · [`discover-units`](gitops/discover-units/) · [`render-diff`](gitops/render-diff/) · [`kustomize-tree`](gitops/kustomize-tree/) · [`argocd-diff`](gitops/argocd-diff/) · [`argocd-refresh`](gitops/argocd-refresh/) · [`group-report`](gitops/group-report/) · [`gate-summary`](gitops/gate-summary/) | [`gitops-argocd-group.yaml`](../.github/workflows/gitops-argocd-group.yaml), [`gitops-argocd-gate.yaml`](../.github/workflows/gitops-argocd-gate.yaml) — [devsecops-gitops](../products/devsecops-gitops/README.md) |
+| `scripted/` | [`run-command`](scripted/run-command/) · [`phase-summary`](scripted/phase-summary/) | [`scripted-phase.yaml`](../.github/workflows/scripted-phase.yaml) — [devsecops-scripted](../products/devsecops-scripted/README.md): preview, then approve, then apply for any scripted phase (the composites run a command on the runner or inside the caller's tools image and render the approver's summary); its runner-side toolchain is `gitops/toolchain` |
 
 ## Two homes, one target
 
@@ -14,4 +15,4 @@ Org composites currently live in two places: **`ohanalabs-ai/actions`** (`docker
 
 - Emoji `name:` on the steps; every third-party `uses:` pinned to a commit SHA with a version comment; org-owned references at `@main`.
 - The reusable workflows check out this repo at their own commit (`job.workflow_sha`) and call the actions as `./.gitops-platform/actions/<category>/<name>`, so a workflow on a feature branch runs that branch's actions.
-- Every script has a header documenting its arguments/environment and is covered by `tests/` (`tests/gitops/run-tests.sh`) and the matching `*-selftest.yaml` workflow.
+- Every script has a header documenting its arguments/environment and is covered by `tests/` (`tests/gitops/run-tests.sh`, `tests/scripted/run-tests.sh`) and the matching `*-selftest.yaml` workflow.

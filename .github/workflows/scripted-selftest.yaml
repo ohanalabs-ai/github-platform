@@ -1,0 +1,57 @@
+# 🧪 Self-test of the devsecops-scripted product on THIS repo's pull requests: actionlint the
+# reusable workflow, bash -n + shellcheck the composite scripts, then tests/scripted/run-tests.sh
+# — stdout capture / exit-code propagation / env forwarding of run-command, and every shape of
+# the phase summary (gated · ungated · preview-only · destructive · failed preview · apply).
+# No docker, no cluster, no secrets.
+name: 🧪 scripted-selftest
+run-name: "🧪 devsecops-scripted self-test — ${{ github.event.pull_request.title || github.ref_name }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/scripted-*.yaml"
+      - ".github/actionlint.yaml"
+      - "actions/scripted/**"
+      - "tests/scripted/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/scripted-*.yaml"
+      - "actions/scripted/**"
+      - "tests/scripted/**"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: 🚨 lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: ⚙️ actionlint (scripted-*.yaml)
+        run: docker run --rm -v "$PWD":/repo --workdir /repo rhysd/actionlint:1.7.12 -color .github/workflows/scripted-phase.yaml .github/workflows/scripted-selftest.yaml
+      - name: 📜 bash -n + shellcheck (composite scripts)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck >/dev/null
+          for f in actions/scripted/*/*.sh tests/scripted/*.sh; do bash -n "$f"; done
+          shellcheck -S warning actions/scripted/*/*.sh tests/scripted/*.sh
+          echo "ok: $(find actions/scripted tests/scripted -name '*.sh' | wc -l) scripts"
+      - name: 📌 third-party actions are SHA-pinned (scripted-phase.yaml)
+        run: |
+          set -euo pipefail
+          # every `uses: owner/repo@ref` in the reusable workflow that is not this org's is a 40-hex SHA with a version comment
+          bad="$(grep -nE '^\s*(- )?uses: [^./ ]+/[^ @]+@' .github/workflows/scripted-phase.yaml | grep -vE '@[0-9a-f]{40} # v' || true)"
+          if [ -n "$bad" ]; then echo "::error::unpinned action(s):"; echo "$bad"; exit 1; fi
+          echo "ok: $(grep -cE '^\s*(- )?uses: [^./ ]+/[^ @]+@[0-9a-f]{40} # v' .github/workflows/scripted-phase.yaml) pinned uses"
+
+  tests:
+    name: 🧪 scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: 🧪 tests/scripted/run-tests.sh
+        run: |
+          set -o pipefail
+          bash tests/scripted/run-tests.sh | tee -a "$GITHUB_STEP_SUMMARY"

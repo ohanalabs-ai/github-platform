@@ -1,0 +1,577 @@
+# 🎛️ Reusable "preview, then approve, then apply" for a SCRIPTED phase — the devsecops-scripted
+# product (products/devsecops-scripted/README.md). For the imperative automation that is not
+# Terraform and not ArgoCD: a repo's `workflow_dispatch` that runs a script against a live
+# cluster or a Vault (`phase=vault-seed`, `phase=addons`, `phase=teardown`, a GKE demo cycle,
+# an image mirror). Until now those ran as ONE job inside a gated GitHub Environment, so the
+# reviewer saw "Review deployments" with a free-form phase name and NOTHING about what the
+# run was going to do — and approved blind (planeodev/planeo-infra run 36620677548,
+# `phase=vault-seed`, 2026-09-29). This is the Terraform plan→apply shape
+# (terraform-devsecops-workflow.yaml) generalised to any script:
+#
+#   🔍 preview   NO Environment. Joins the tailnet / assumes the cloud role / logs into Vault
+#                exactly like the apply will, runs `setup-command` then `preview-command`
+#                (READ-ONLY by contract — the caller's script, e.g. `DRY_RUN=1 …`, a
+#                `kubectl diff --server-side`, a Vault KV key-name comparison), and turns its
+#                stdout (markdown) into the step summary + an artifact (+ a sticky PR comment
+#                on pull_request events). The summary also lists, verbatim, every command the
+#                apply will run — so even a phase that cannot be previewed faithfully shows the
+#                approver its inputs and its exact commands.
+#   🚀 apply     `needs: preview`; runs in the gated Environment (`environment-name`, default
+#                `production`) so the approver reads the preview IN THE SAME RUN before
+#                clicking approve. Re-prints the approved preview at the top of its log and in
+#                its summary, then runs `setup-command` + `apply-command` (+ `post-command`,
+#                always, e.g. a status board). `gated: false` skips the Environment (read-only
+#                / test phases); an empty `apply-command` skips the job (preview-only phase).
+#
+# Execution: every command runs through actions/scripted/run-command — inside the caller's
+# TOOLS IMAGE (`tools-image`, `docker run --network host`, checkout + $RUNNER_TEMP mounted at
+# the same paths, the cloud/Vault env forwarded) or on the runner (empty `tools-image`; the
+# `toolchain` input puts pinned kustomize/kubectl/helm/argocd on PATH via
+# actions/gitops/toolchain). $KUBECONFIG is set to a file under $RUNNER_TEMP in both jobs, so
+# a `setup-command` that writes it (`aws eks update-kubeconfig`, `gcloud … get-credentials`)
+# hands it to the preview/apply command whichever side of the container they run on.
+#
+# Wiring (all optional, one cloud identity per call — the terraform-devsecops-workflow shape):
+#   aws-role-arn + aws-region                       GitHub OIDC → IAM role (aws-actions/configure-aws-credentials)
+#   gcp-workload-identity-provider + gcp-service-account [+ gcp-project-id]   GitHub OIDC → WIF
+#     [+ gke-cluster + gke-location]                gcloud container clusters get-credentials --dns-endpoint
+#   join-tailscale (+ secrets TS_OAUTH_CLIENT_ID/TS_OAUTH_SECRET)   the private API / Vault are tailnet-only
+#   vault-addr + vault-role (+ vault-jwt-path/-audience, vault-secrets)   hashicorp/vault-action, method jwt;
+#     vault-export-token=false keeps VAULT_TOKEN OUT of the env for a phase that must use another
+#     token (planeo-infra's Vault seeds need the operator root token — a CI token in VAULT_TOKEN
+#     wins the precedence and every seed dies with 403; knowledge/gotchas/ci-vault-token-preempts-the-seed-root-token.md)
+#
+# CALLERS MUST PASS THE TAILSCALE SECRETS EXPLICITLY (`secrets: { TS_OAUTH_CLIENT_ID: …, TS_OAUTH_SECRET: … }`)
+# — `secrets: inherit` did not deliver a caller org's selected-repository secrets to a workflow
+# hosted in another org (gitops-argocd-group.yaml, 2026-09-23). Caller job permissions this
+# workflow needs: contents: read · id-token: write (cloud OIDC, Vault) · packages: read (tools
+# image) · pull-requests: write (the sticky comment, pull_request events only).
+name: 🎛️ scripted-phase
+run-name: "🎛️ ${{ inputs.phase }}${{ inputs.target != '' && format(' · {0}', inputs.target) || '' }} — preview, then ${{ inputs.apply-command != '' && (inputs.gated && 'gated apply' || 'apply') || 'preview only' }}"
+
+on:
+  workflow_call:
+    inputs:
+      phase:
+        description: "The phase label (what the caller's dispatch chose, e.g. vault-seed) — summaries, artifact name, run-name"
+        type: string
+        required: true
+      target:
+        description: "The target label (e.g. the cluster directory) — summaries only"
+        type: string
+        required: false
+        default: ""
+      preview-command:
+        description: "READ-ONLY command whose stdout is the preview (markdown); its exit code blocks the apply when non-zero. Say honestly when a phase cannot be previewed: list its inputs and the exact apply commands."
+        type: string
+        required: true
+      apply-command:
+        description: "The command that changes things. Empty → preview-only (no apply job)."
+        type: string
+        required: false
+        default: ""
+      setup-command:
+        description: "Runs before the preview AND before the apply (both jobs), e.g. `bash scripts/tf-init.sh && bash scripts/kubeconfig.sh`"
+        type: string
+        required: false
+        default: ""
+      post-command:
+        description: "Runs after the apply command, always (even when it failed); its stdout ends the apply summary — a status board, a verify"
+        type: string
+        required: false
+        default: ""
+      gated:
+        description: "true → the apply job runs in the GitHub Environment `environment-name` (its required reviewers approve after reading the preview). false → no Environment (read-only / test phases)."
+        type: boolean
+        required: false
+        default: true
+      environment-name:
+        description: "The GitHub Environment the apply job runs in when gated"
+        type: string
+        required: false
+        default: production
+      destructive:
+        description: "true → the preview carries a red banner (teardown/destroy-class phases)"
+        type: boolean
+        required: false
+        default: false
+      tools-image:
+        description: "Run every command inside this image (docker run --network host, repo + $RUNNER_TEMP mounted). Empty → on the runner."
+        type: string
+        required: false
+        default: ""
+      forward-env:
+        description: "Env var NAMES forwarded into the tools image when set (values never printed)"
+        type: string
+        required: false
+        default: "AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REGION STATE_BUCKET LOCK_TABLE VAULT_ADDR VAULT_TOKEN KUBECONFIG DRY_RUN GITHUB_ACTIONS CI"
+      env:
+        description: "NON-SECRET `KEY=VALUE` lines exported in both jobs (e.g. REGION, STATE_BUCKET, VAULT_ADDR from the caller's variables)"
+        type: string
+        required: false
+        default: ""
+      toolchain:
+        description: "Tools to put on PATH when running on the runner (subset of: kustomize helm argocd kubectl), from pinned releases via actions/gitops/toolchain. Ignored with tools-image."
+        type: string
+        required: false
+        default: ""
+      kustomize-version:
+        type: string
+        required: false
+        default: "5.5.0"
+      helm-version:
+        type: string
+        required: false
+        default: "3.16.3"
+      argocd-version:
+        type: string
+        required: false
+        default: "3.5.3"
+      kubectl-version:
+        type: string
+        required: false
+        default: "1.36.2"
+      aws-role-arn:
+        description: "IAM role to assume with the job's GitHub OIDC token; empty → no AWS auth"
+        type: string
+        required: false
+        default: ""
+      aws-region:
+        type: string
+        required: false
+        default: ""
+      gcp-workload-identity-provider:
+        description: "Workload Identity Provider resource name (google-github-actions/auth); empty → no GCP auth"
+        type: string
+        required: false
+        default: ""
+      gcp-service-account:
+        type: string
+        required: false
+        default: ""
+      gcp-project-id:
+        type: string
+        required: false
+        default: ""
+      gke-cluster:
+        description: "With GCP auth: `gcloud container clusters get-credentials <gke-cluster> --location <gke-location> --dns-endpoint` into $KUBECONFIG before the commands"
+        type: string
+        required: false
+        default: ""
+      gke-location:
+        type: string
+        required: false
+        default: ""
+      join-tailscale:
+        description: "Join the runner to the tailnet (tailscale/github-action) before the commands — needs the TS_OAUTH_* secrets; fails loudly without them"
+        type: boolean
+        required: false
+        default: false
+      tailscale-tags:
+        type: string
+        required: false
+        default: "tag:ci"
+      tailscale-args:
+        type: string
+        required: false
+        default: "--accept-routes"
+      vault-addr:
+        description: "Vault address; when set, both jobs log in with the job's GitHub OIDC token (hashicorp/vault-action, method jwt). Empty → no Vault login."
+        type: string
+        required: false
+        default: ""
+      vault-jwt-path:
+        type: string
+        required: false
+        default: github-jwt
+      vault-role:
+        description: "The JWT role (its bound_claims decide which repo/ref may use it); required with vault-addr"
+        type: string
+        required: false
+        default: ""
+      vault-jwt-audience:
+        type: string
+        required: false
+        default: ""
+      vault-secrets:
+        description: "hashicorp/vault-action `secrets:` spec (`<path> <key> | <ENV_VAR>` per line) exported as masked env; empty → login only"
+        type: string
+        required: false
+        default: ""
+      vault-export-token:
+        description: "Export the login token as VAULT_TOKEN into the env (forwarded to the tools image). Set false for a phase whose scripts must resolve another token."
+        type: boolean
+        required: false
+        default: true
+      sticky-comment:
+        description: "On pull_request events, post/refresh a sticky PR comment with the preview (needs pull-requests: write)"
+        type: boolean
+        required: false
+        default: true
+      runner:
+        type: string
+        required: false
+        default: ubuntu-latest
+    secrets:
+      TS_OAUTH_CLIENT_ID:
+        description: "Tailscale OAuth client (tags in tailscale-tags) — only read when join-tailscale is true"
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
+    outputs:
+      preview-exit-code:
+        description: "The preview command's exit code"
+        value: ${{ jobs.preview.outputs.preview-exit-code }}
+
+env:
+  PLATFORM_REPO: ohanalabs-ai/github-platform
+  PLATFORM_DIR: .scripted-platform
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  preview:
+    name: 🔍 preview
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      preview-exit-code: ${{ steps.preview.outputs.exit-code }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: 📥 devsecops-scripted actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+
+      - name: 🧾 job env (non-secret) + KUBECONFIG under $RUNNER_TEMP
+        env:
+          ENV_LINES: ${{ inputs.env }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/scripted-phase"
+          echo "KUBECONFIG=$RUNNER_TEMP/scripted-phase/kubeconfig" >> "$GITHUB_ENV"
+          # one KEY=VALUE per line; blank lines and #-comments skipped; names printed, values not
+          while IFS= read -r line; do
+            case "$line" in ''|'#'*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"; echo "env: ${line%%=*}"
+          done <<<"$ENV_LINES"
+
+      - name: 🔎 tailnet secrets present?
+        if: inputs.join-tailscale
+        env:
+          HAS_TAILNET: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '' }}
+        run: |
+          if [ "$HAS_TAILNET" != true ]; then
+            echo "::error::join-tailscale is true but the TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET secrets are not set — pass them explicitly (secrets: inherit does not cross orgs)"; exit 1
+          fi
+          echo "tailnet secrets present"
+
+      - name: ☁️ AWS credentials (GitHub OIDC)
+        if: inputs.aws-role-arn != ''
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: ☁️ Google Cloud credentials (GitHub OIDC → Workload Identity Federation)
+        if: inputs.gcp-workload-identity-provider != ''
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+          project_id: ${{ inputs.gcp-project-id }}
+
+      - name: ☁️ gcloud (+ gke-gcloud-auth-plugin)
+        if: inputs.gcp-workload-identity-provider != ''
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: 🔑 GKE kubeconfig (IAM DNS endpoint)
+        if: inputs.gcp-workload-identity-provider != '' && inputs.gke-cluster != ''
+        env:
+          GKE_CLUSTER: ${{ inputs.gke-cluster }}
+          GKE_LOCATION: ${{ inputs.gke-location }}
+          GCP_PROJECT: ${{ inputs.gcp-project-id }}
+        run: |
+          gcloud container clusters get-credentials "$GKE_CLUSTER" --location "$GKE_LOCATION" ${GCP_PROJECT:+--project "$GCP_PROJECT"} --dns-endpoint
+          kubectl get nodes
+
+      - name: 🔗 tailnet (tailscale/github-action)
+        if: inputs.join-tailscale
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ inputs.tailscale-tags }}
+          args: ${{ inputs.tailscale-args }}
+
+      - name: 🔐 Vault login (GitHub OIDC, method jwt)
+        if: inputs.vault-addr != ''
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-addr }}
+          method: jwt
+          path: ${{ inputs.vault-jwt-path }}
+          role: ${{ inputs.vault-role }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportToken: ${{ inputs.vault-export-token }}
+          secrets: ${{ inputs.vault-secrets }}
+
+      - name: 🧰 toolchain (${{ inputs.toolchain }})
+        if: inputs.toolchain != '' && inputs.tools-image == ''
+        uses: ./.scripted-platform/actions/gitops/toolchain
+        with:
+          tools: ${{ inputs.toolchain }}
+          kustomize-version: ${{ inputs.kustomize-version }}
+          helm-version: ${{ inputs.helm-version }}
+          argocd-version: ${{ inputs.argocd-version }}
+          kubectl-version: ${{ inputs.kubectl-version }}
+
+      - name: ⚙️ setup
+        if: inputs.setup-command != ''
+        uses: ./.scripted-platform/actions/scripted/run-command
+        with:
+          title: setup
+          command: ${{ inputs.setup-command }}
+          tools-image: ${{ inputs.tools-image }}
+          registry-token: ${{ github.token }}
+          forward-env: ${{ inputs.forward-env }}
+
+      # READ-ONLY by contract: the caller's preview command must not change anything. Its
+      # exit code is reported (the summary says the apply is blocked) rather than swallowed.
+      - name: 🔍 preview (read-only)
+        id: preview
+        uses: ./.scripted-platform/actions/scripted/run-command
+        with:
+          title: preview
+          command: ${{ inputs.preview-command }}
+          tools-image: ${{ inputs.tools-image }}
+          registry-token: ${{ github.token }}
+          forward-env: ${{ inputs.forward-env }}
+          capture-file: ${{ runner.temp }}/scripted-phase/preview.md
+          allow-failure: "true"
+
+      - name: 📝 summary + artifact
+        if: always()
+        uses: ./.scripted-platform/actions/scripted/phase-summary
+        with:
+          mode: preview
+          phase: ${{ inputs.phase }}
+          target: ${{ inputs.target }}
+          setup-command: ${{ inputs.setup-command }}
+          preview-command: ${{ inputs.preview-command }}
+          apply-command: ${{ inputs.apply-command }}
+          post-command: ${{ inputs.post-command }}
+          gated: ${{ inputs.gated }}
+          environment-name: ${{ inputs.environment-name }}
+          destructive: ${{ inputs.destructive }}
+          preview-file: ${{ runner.temp }}/scripted-phase/preview.md
+          preview-exit-code: ${{ steps.preview.outputs.exit-code || '1' }}
+          out: ${{ runner.temp }}/scripted-phase/summary.md
+
+      - name: 📝 step summary
+        if: always()
+        run: cat "$RUNNER_TEMP/scripted-phase/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 📦 artifact scripted-phase-preview
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scripted-phase-preview-${{ inputs.phase }}${{ inputs.target != '' && format('-{0}', inputs.target) || '' }}
+          path: |
+            ${{ runner.temp }}/scripted-phase/preview.md
+            ${{ runner.temp }}/scripted-phase/summary.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 💬 sticky PR comment
+        if: always() && github.event_name == 'pull_request' && inputs.sticky-comment
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: scripted-phase-${{ inputs.phase }}-${{ inputs.target }}
+          path: ${{ runner.temp }}/scripted-phase/summary.md
+
+      - name: ❌ the preview command failed — the apply is blocked
+        if: steps.preview.outputs.exit-code != '0'
+        run: |
+          echo "::error::preview exited ${{ steps.preview.outputs.exit-code }} — read the summary; the 🚀 apply job will not run"
+          exit 1
+
+  # The gate. `environment:` cannot be omitted at runtime, but its NAME can be an expression —
+  # an empty name is "no Environment" (gated: false → the job runs right after the preview).
+  apply:
+    name: 🚀 apply
+    needs: [preview]
+    if: inputs.apply-command != ''
+    runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.gated && inputs.environment-name || '' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: 📥 devsecops-scripted actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+
+      - name: 📥 the approved preview
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: scripted-phase-preview-${{ inputs.phase }}${{ inputs.target != '' && format('-{0}', inputs.target) || '' }}
+          path: ${{ runner.temp }}/scripted-phase/approved
+
+      # What the approver read, first thing in this job's log — the audit trail of the click.
+      - name: 🔍 preview this apply was approved on
+        run: |
+          echo "::group::🔍 preview (as shown to the approver)"
+          cat "$RUNNER_TEMP/scripted-phase/approved/preview.md" 2>/dev/null || echo "(no preview captured)"
+          echo "::endgroup::"
+
+      - name: 🧾 job env (non-secret) + KUBECONFIG under $RUNNER_TEMP
+        env:
+          ENV_LINES: ${{ inputs.env }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/scripted-phase"
+          echo "KUBECONFIG=$RUNNER_TEMP/scripted-phase/kubeconfig" >> "$GITHUB_ENV"
+          while IFS= read -r line; do
+            case "$line" in ''|'#'*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"; echo "env: ${line%%=*}"
+          done <<<"$ENV_LINES"
+
+      - name: 🔎 tailnet secrets present?
+        if: inputs.join-tailscale
+        env:
+          HAS_TAILNET: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '' }}
+        run: |
+          if [ "$HAS_TAILNET" != true ]; then
+            echo "::error::join-tailscale is true but the TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET secrets are not set — pass them explicitly (secrets: inherit does not cross orgs)"; exit 1
+          fi
+          echo "tailnet secrets present"
+
+      - name: ☁️ AWS credentials (GitHub OIDC)
+        if: inputs.aws-role-arn != ''
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: ☁️ Google Cloud credentials (GitHub OIDC → Workload Identity Federation)
+        if: inputs.gcp-workload-identity-provider != ''
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+          project_id: ${{ inputs.gcp-project-id }}
+
+      - name: ☁️ gcloud (+ gke-gcloud-auth-plugin)
+        if: inputs.gcp-workload-identity-provider != ''
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: 🔑 GKE kubeconfig (IAM DNS endpoint)
+        if: inputs.gcp-workload-identity-provider != '' && inputs.gke-cluster != ''
+        env:
+          GKE_CLUSTER: ${{ inputs.gke-cluster }}
+          GKE_LOCATION: ${{ inputs.gke-location }}
+          GCP_PROJECT: ${{ inputs.gcp-project-id }}
+        run: |
+          gcloud container clusters get-credentials "$GKE_CLUSTER" --location "$GKE_LOCATION" ${GCP_PROJECT:+--project "$GCP_PROJECT"} --dns-endpoint
+          kubectl get nodes
+
+      - name: 🔗 tailnet (tailscale/github-action)
+        if: inputs.join-tailscale
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ inputs.tailscale-tags }}
+          args: ${{ inputs.tailscale-args }}
+
+      - name: 🔐 Vault login (GitHub OIDC, method jwt)
+        if: inputs.vault-addr != ''
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-addr }}
+          method: jwt
+          path: ${{ inputs.vault-jwt-path }}
+          role: ${{ inputs.vault-role }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportToken: ${{ inputs.vault-export-token }}
+          secrets: ${{ inputs.vault-secrets }}
+
+      - name: 🧰 toolchain (${{ inputs.toolchain }})
+        if: inputs.toolchain != '' && inputs.tools-image == ''
+        uses: ./.scripted-platform/actions/gitops/toolchain
+        with:
+          tools: ${{ inputs.toolchain }}
+          kustomize-version: ${{ inputs.kustomize-version }}
+          helm-version: ${{ inputs.helm-version }}
+          argocd-version: ${{ inputs.argocd-version }}
+          kubectl-version: ${{ inputs.kubectl-version }}
+
+      - name: ⚙️ setup
+        if: inputs.setup-command != ''
+        uses: ./.scripted-platform/actions/scripted/run-command
+        with:
+          title: setup
+          command: ${{ inputs.setup-command }}
+          tools-image: ${{ inputs.tools-image }}
+          registry-token: ${{ github.token }}
+          forward-env: ${{ inputs.forward-env }}
+
+      - name: 🚀 apply
+        id: apply
+        uses: ./.scripted-platform/actions/scripted/run-command
+        with:
+          title: apply
+          command: ${{ inputs.apply-command }}
+          tools-image: ${{ inputs.tools-image }}
+          registry-token: ${{ github.token }}
+          forward-env: ${{ inputs.forward-env }}
+          capture-file: ${{ runner.temp }}/scripted-phase/apply.out
+          allow-failure: "true"
+
+      - name: 📊 post
+        if: always() && inputs.post-command != ''
+        uses: ./.scripted-platform/actions/scripted/run-command
+        with:
+          title: post
+          command: ${{ inputs.post-command }}
+          tools-image: ${{ inputs.tools-image }}
+          registry-token: ${{ github.token }}
+          forward-env: ${{ inputs.forward-env }}
+          capture-file: ${{ runner.temp }}/scripted-phase/post.out
+          allow-failure: "true"
+
+      - name: 📝 summary
+        if: always()
+        uses: ./.scripted-platform/actions/scripted/phase-summary
+        with:
+          mode: apply
+          phase: ${{ inputs.phase }}
+          target: ${{ inputs.target }}
+          setup-command: ${{ inputs.setup-command }}
+          preview-command: ${{ inputs.preview-command }}
+          apply-command: ${{ inputs.apply-command }}
+          post-command: ${{ inputs.post-command }}
+          gated: ${{ inputs.gated }}
+          environment-name: ${{ inputs.environment-name }}
+          destructive: ${{ inputs.destructive }}
+          preview-file: ${{ runner.temp }}/scripted-phase/approved/preview.md
+          apply-file: ${{ runner.temp }}/scripted-phase/apply.out
+          apply-exit-code: ${{ steps.apply.outputs.exit-code || '1' }}
+          post-file: ${{ runner.temp }}/scripted-phase/post.out
+          out: ${{ runner.temp }}/scripted-phase/summary.md
+
+      - name: 📝 step summary
+        if: always()
+        run: cat "$RUNNER_TEMP/scripted-phase/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ❌ apply failed
+        if: steps.apply.outputs.exit-code != '0'
+        run: |
+          echo "::error::apply exited ${{ steps.apply.outputs.exit-code }}"
+          exit 1

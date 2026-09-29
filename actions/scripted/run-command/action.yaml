@@ -1,0 +1,60 @@
+# ▶ Run one shell command for the scripted-phase reusable workflow — on the runner or inside
+# the caller's tools image (`docker run --network host`, checkout + $RUNNER_TEMP mounted at the
+# same paths) — capturing stdout to a file the workflow turns into the preview summary /
+# artifact. See run.sh + README.md.
+name: scripted-run-command
+description: "Run a shell command (on the runner or inside a tools image over the host network), capture its stdout to a file, report its exit code"
+inputs:
+  command:
+    description: "The shell command (bash -c). A PREVIEW command prints markdown on stdout, chatter on stderr."
+    required: true
+  title:
+    description: "Label for the log group and the default capture file name (setup | preview | apply | post)"
+    required: false
+    default: command
+  tools-image:
+    description: "Container image to run the command in (e.g. ghcr.io/<org>/<repo>/tools:latest); empty → run on the runner"
+    required: false
+    default: ""
+  registry-token:
+    description: "Token to `docker login` the image's registry (ghcr.io: the job's GITHUB_TOKEN); ignored without tools-image"
+    required: false
+    default: ""
+  forward-env:
+    description: "Space-separated env var NAMES to forward into the container when set in the job env (values never printed)"
+    required: false
+    default: "AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REGION STATE_BUCKET LOCK_TABLE VAULT_ADDR VAULT_TOKEN KUBECONFIG DRY_RUN GITHUB_ACTIONS CI"
+  capture-file:
+    description: "Where stdout is captured (default $RUNNER_TEMP/scripted-phase/<title>.out)"
+    required: false
+    default: ""
+  allow-failure:
+    description: "true → a non-zero exit is reported in `exit-code` but does not fail the step"
+    required: false
+    default: "false"
+outputs:
+  exit-code:
+    description: "The command's exit code"
+    value: ${{ steps.run.outputs.exit-code }}
+  capture-file:
+    description: "Path of the captured stdout"
+    value: ${{ steps.run.outputs.capture-file }}
+  lines:
+    description: "Number of captured lines"
+    value: ${{ steps.run.outputs.lines }}
+runs:
+  using: composite
+  steps:
+    - name: ▶ ${{ inputs.title }}
+      id: run
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        TITLE: ${{ inputs.title }}
+        TOOLS_IMAGE: ${{ inputs.tools-image }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        REGISTRY_USER: ${{ github.actor }}
+        FORWARD_ENV: ${{ inputs.forward-env }}
+        CAPTURE_FILE: ${{ inputs.capture-file }}
+        ALLOW_FAILURE: ${{ inputs.allow-failure }}
+      run: bash "${{ github.action_path }}/run.sh"

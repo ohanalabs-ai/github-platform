@@ -7,3 +7,7 @@ paths:
   .github/workflows/gitops-argocd-*.yaml:
     ignore:
       - 'property "(job_)?workflow_sha" is not defined in object type'
+  # scripted-phase.yaml (devsecops-scripted) checks out its actions/scripted/* the same way.
+  .github/workflows/scripted-phase.yaml:
+    ignore:
+      - 'property "(job_)?workflow_sha" is not defined in object type'
