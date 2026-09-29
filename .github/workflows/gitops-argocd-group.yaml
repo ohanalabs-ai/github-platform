@@ -700,7 +700,9 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo, deployment_id: dep.id,
               state: ok ? (validated ? 'success' : 'inactive') : 'failure',
               log_url: process.env.RUN_URL, environment_url: process.env.ENV_URL,
-              description: ok ? (validated ? `validated: ${units.join(', ')}` : 'refresh skipped: ARGOCD_SERVER not configured') : `validation failed — see ${process.env.RUN_URL}`,
+              // GitHub caps a DeploymentStatus description at 140 chars; a group with many units (core: 13)
+                  // blew past it and the whole 📋 result job failed AFTER a successful refresh (planeo-infra #330).
+                  description: (ok ? (validated ? `validated: ${units.join(', ')}` : 'refresh skipped: ARGOCD_SERVER not configured') : `validation failed — see ${process.env.RUN_URL}`).slice(0, 140),
             });
             core.summary.addRaw(`\n🚀 Deployment #${dep.id} → environment **${process.env.ENV_NAME}** (${ok ? (validated ? 'success' : 'inactive — not configured') : 'failure'})\n`).write();
 
