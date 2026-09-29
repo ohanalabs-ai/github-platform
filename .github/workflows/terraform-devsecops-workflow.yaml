@@ -617,9 +617,30 @@ jobs:
 
       - name: Render plan summary
         working-directory: ${{ inputs.working-directory }}
+        env:
+          EXPECTED_DEPLOY_EVENTS: ${{ inputs.expected-deploy-events }}
+          TF_ENVIRONMENT_NAME: ${{ inputs.terraform-environment-name }}
+          PR_BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
           terraform show -json plan.tfplan | terraform-j2md > terraform-plan.md
+          # A repo that lists `push` in expected-deploy-events APPLIES once this PR merges
+          # (the caller's push trigger + run-deploy). The plan comment is then the last thing
+          # a reviewer reads before that apply — so it must say, loudly, that a passing plan
+          # is not a passing apply and where to watch the apply (planeodev/planeo-infra #330:
+          # the operator had to know to open the post-merge run by themselves).
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && printf ',%s,' "${EXPECTED_DEPLOY_EVENTS}" | tr -d ' ' | grep -q ',push,'; then
+            wf_file="${GITHUB_WORKFLOW_REF#*/.github/workflows/}"; wf_file="${wf_file%%@*}"
+            runs_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/${wf_file}?query=branch%3A${PR_BASE_REF}"
+            {
+              echo "> [!WARNING]"
+              echo "> **After this PR merges, Terraform APPLIES this plan on \`${PR_BASE_REF}\`.** This comment is the plan, not the apply: a plan that passed can still fail at apply time (IAM propagation, quotas, a name that already exists, provider drift). Once merged, open the \`🚀 deploy\` job of the \`${PR_BASE_REF}\` run and read it to the end **before** any post-merge step that depends on the new resources (a seed, a render-vars store, an ArgoCD sync that consumes an output)."
+              echo "> Apply runs: ${runs_url} — GitHub Environment \`${TF_ENVIRONMENT_NAME}\` (or \`${TF_ENVIRONMENT_NAME}-unattended\` when the caller treats the merge as the approval)."
+              echo ""
+              cat terraform-plan.md
+            } > terraform-plan.with-warning.md
+            mv terraform-plan.with-warning.md terraform-plan.md
+          fi
           {
             echo "📝️ Terraform plan"
             echo ""
