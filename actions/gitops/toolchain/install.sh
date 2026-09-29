@@ -91,6 +91,12 @@ for t in $TOOLS yq; do
   command -v "$t" >/dev/null 2>&1 || continue
   case "$t" in
     kustomize) kustomize version 2>/dev/null | head -1 ;; helm) helm version --short 2>/dev/null ;; argocd) argocd version --client --short 2>/dev/null ;;
-    kubectl) kubectl version --client 2>/dev/null | head -1 ;; yq) yq --version ;;
+    # NOT `| head -1`: head closes the pipe after the first line, kubectl (a docker shim) gets
+    # SIGPIPE writing the second one, and with pipefail + set -e the whole script dies right
+    # after "Client Version" with stderr already discarded — the intermittent silent exit 1 of
+    # ohanalabs-ai/github-platform#29 (planeo-infra #330: 2/6 then 3/8 live-diff jobs). jq
+    # reads all input, so nothing closes the pipe early.
+    kubectl) kubectl version --client -o json 2>/dev/null | jq -r '"Client Version: " + .clientVersion.gitVersion' ;;
+    yq) yq --version ;;
   esac
 done
