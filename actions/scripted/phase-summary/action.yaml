@@ -1,0 +1,95 @@
+# 📝 Compose the scripted-phase summary: identity, the exact commands the apply will run, the
+# captured preview, what happens next (the gate) — or, in the apply job, the approved preview
+# followed by the apply/post output. See summary.sh + README.md.
+name: scripted-phase-summary
+description: "Render the preview-then-approve markdown for one scripted phase (preview or apply mode)"
+inputs:
+  mode:
+    description: "preview | apply"
+    required: false
+    default: preview
+  phase:
+    required: true
+    description: "the phase label"
+  target:
+    required: false
+    default: ""
+    description: "the target label (cluster)"
+  setup-command:
+    required: false
+    default: ""
+    description: "the setup command, verbatim"
+  preview-command:
+    required: false
+    default: ""
+    description: "the preview command, verbatim"
+  apply-command:
+    required: false
+    default: ""
+    description: "the apply command, verbatim (empty → preview-only)"
+  post-command:
+    required: false
+    default: ""
+    description: "the post command, verbatim"
+  gated:
+    required: false
+    default: "true"
+    description: "whether the apply job waits on an Environment reviewer"
+  environment-name:
+    required: false
+    default: production
+    description: "the Environment the apply job runs in when gated"
+  destructive:
+    required: false
+    default: "false"
+    description: "true → red banner"
+  preview-file:
+    required: false
+    default: ""
+    description: "captured preview stdout"
+  preview-exit-code:
+    required: false
+    default: "0"
+    description: "the preview command's exit code"
+  apply-file:
+    required: false
+    default: ""
+    description: "captured apply stdout (mode=apply)"
+  apply-exit-code:
+    required: false
+    default: "0"
+    description: "the apply command's exit code (mode=apply)"
+  post-file:
+    required: false
+    default: ""
+    description: "captured post-command stdout (mode=apply)"
+  out:
+    required: true
+    description: "where to write the markdown"
+runs:
+  using: composite
+  steps:
+    - name: 📝 summary (${{ inputs.mode }})
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        PHASE: ${{ inputs.phase }}
+        TARGET: ${{ inputs.target }}
+        SETUP_CMD: ${{ inputs.setup-command }}
+        PREVIEW_CMD: ${{ inputs.preview-command }}
+        APPLY_CMD: ${{ inputs.apply-command }}
+        POST_CMD: ${{ inputs.post-command }}
+        GATED: ${{ inputs.gated }}
+        ENVIRONMENT: ${{ inputs.environment-name }}
+        DESTRUCTIVE: ${{ inputs.destructive }}
+        PREVIEW_FILE: ${{ inputs.preview-file }}
+        PREVIEW_RC: ${{ inputs.preview-exit-code }}
+        APPLY_FILE: ${{ inputs.apply-file }}
+        APPLY_RC: ${{ inputs.apply-exit-code }}
+        POST_FILE: ${{ inputs.post-file }}
+        OUT: ${{ inputs.out }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        REF: ${{ github.ref_name }}
+        ACTOR: ${{ github.actor }}
+        EVENT: ${{ github.event_name }}
+      run: bash "${{ github.action_path }}/summary.sh"
