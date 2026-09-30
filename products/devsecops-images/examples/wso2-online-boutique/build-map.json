@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "source": {
+    "repository": "wso2/gcp-microservices-demo",
+    "revision": "57fdd78156a1fec98f99a54107eff7fc603286d1"
+  },
+  "skaffold": "skaffold.yaml",
+  "kustomize": {
+    "base": "kubernetes-manifests"
+  },
+  "services": [
+    {
+      "name": "emailservice",
+      "image": "emailservice",
+      "context": "src/emailservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "productcatalogservice",
+      "image": "productcatalogservice",
+      "context": "src/productcatalogservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "recommendationservice",
+      "image": "recommendationservice",
+      "context": "src/recommendationservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "shippingservice",
+      "image": "shippingservice",
+      "context": "src/shippingservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "checkoutservice",
+      "image": "checkoutservice",
+      "context": "src/checkoutservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "paymentservice",
+      "image": "paymentservice",
+      "context": "src/paymentservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "currencyservice",
+      "image": "currencyservice",
+      "context": "src/currencyservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "cartservice",
+      "image": "cartservice",
+      "context": "src/cartservice/src",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "frontend",
+      "image": "frontend",
+      "context": "src/frontend",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "adservice",
+      "image": "adservice",
+      "context": "src/adservice",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "app"
+    },
+    {
+      "name": "loadgenerator",
+      "image": "loadgenerator",
+      "context": "src/loadgenerator",
+      "dockerfile": "Dockerfile",
+      "skaffold-config": "loadgenerator",
+      "optional": true,
+      "extra-manifest": "kubernetes-manifests/loadgenerator.yaml"
+    }
+  ]
+}
