@@ -1,0 +1,17 @@
+# 🧰 Image-security toolchain — pinned + checksum/GPG-verified trivy, syft, cosign, gh, oras,
+# kustomize and helm on PATH. See install.sh for the pins and how each one is verified.
+name: images-toolchain
+description: "Put checksum-verified trivy / syft / cosign / gh / oras / kustomize / helm releases on PATH"
+inputs:
+  tools:
+    description: "Space-separated subset of: trivy syft cosign gh oras kustomize helm"
+    required: false
+    default: "trivy syft cosign gh oras"
+runs:
+  using: composite
+  steps:
+    - name: 🧰 image toolchain
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: bash "${{ github.action_path }}/install.sh"
