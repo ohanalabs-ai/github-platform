@@ -1,0 +1,10 @@
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/platform/authentik/bootstrap","note":"exists, keeping (never re-minted)"}
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/platform/authentik/oidc-clients","note":"exists, keeping (never re-minted)"}
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/platform/oauth2-proxy/cookie","note":"exists, keeping (never re-minted)"}
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/platform/openobserve/root","note":"exists, keeping (never re-minted)"}
+{"action":"add","type":"vault-kv","name":"planeo/clouds/aws/eks/product/auth-broker/session-key","note":"MISSING — the apply mints it (values generated at apply, never printed)","diff":"--- planeo/clouds/aws/eks/product/auth-broker/session-key (absent)\n+++ planeo/clouds/aws/eks/product/auth-broker/session-key (apply)\n@@ -0,0 +1 @@\n+key = <generated at apply, 32 chars>"}
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/product/auth-broker/redis","note":"exists, keeping (never re-minted)"}
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/product/auth-broker/credstore-redis","note":"exists, keeping (never re-minted)"}
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/platform/argocd/repos/eks-cluster","note":"exists, keeping (deploy key)"}
+{"action":"noop","type":"vault-kv","name":"planeo/clouds/aws/eks/platform/argocd/repos/customers","note":"exists, keeping (deploy key)"}
+{"action":"change","type":"vault-kv","name":"planeo/clusters/platform-aws-eks-use1-prd/render-vars","note":"1 added, 1 changed, 0 removed, 14 unchanged key(s) — a new KV version","diff":"--- planeo/clusters/platform-aws-eks-use1-prd/render-vars (current, v7)\n+++ planeo/clusters/platform-aws-eks-use1-prd/render-vars (apply)\n@@ -1,4 +1,5 @@\n CHANGE_ME_AWS_REGION = <redacted len=9 sha256:5f3c1a2b>\n-CHANGE_ME_CLUSTER_NAME = <redacted len=11 sha256:0a9b8c7d>\n+CHANGE_ME_CLUSTER_NAME = <redacted len=15 sha256:e1f2a3b4>\n+CHANGE_ME_GVISOR_NODEPOOL = <redacted len=6 sha256:77aa11bb>\n CHANGE_ME_DOMAIN = <redacted len=10 sha256:9c8d7e6f>"}

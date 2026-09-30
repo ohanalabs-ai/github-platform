@@ -13,6 +13,14 @@
 #   summary/preview          header, the red banner, the verbatim commands, the embedded preview,
 #                            the gate sentence for gated / ungated / preview-only, the failure note
 #   summary/apply            approved preview + apply output + post output; truncation note
+#   plan/render              the plan manifest (fixtures/plan-*.jsonl|json) renders EXACTLY like the
+#                            golden fixtures/plan-*.md — the Terraform-plan-comment shape: headline
+#                            counts recomputed (a lying summary is ignored), per-action bullets,
+#                            unchanged collapsed, notes/errors, one ````diff per change; jsonl +
+#                            plan.json concatenated; malformed lines skipped + counted; no manifest → 3
+#   plan/summary             MODE=preview with PLAN_DIR puts the plan first and the free text in a
+#                            collapsed appendix; without a manifest the output is byte-identical to
+#                            the no-PLAN_DIR output (backwards compatible); MODE=apply embeds plan.md
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; root="$(cd "$here/../.." && pwd)"
 A="$root/actions/scripted"; W="${RUNNER_TEMP:-/tmp}/scripted-selftest"; rm -rf "$W"; mkdir -p "$W"
@@ -95,6 +103,65 @@ check "post output embedded" "grep -q 'all green' $W/s5.md"
 head -c 5000 /dev/zero | tr '\0' 'x' > "$W/big.out"
 MODE=apply PHASE=addons APPLY_CMD=x PREVIEW_FILE="$W/preview.md" APPLY_FILE="$W/big.out" MAX_BYTES=1000 OUT="$W/s6.md" bash "$A/phase-summary/summary.sh"
 check "truncation note" "grep -q 'truncated at 1000 bytes (5000 total)' $W/s6.md"
+
+echo "== plan/render (golden fixtures)"
+F="$here/fixtures"; P="$A/phase-summary/plan.sh"
+d="$W/plan1"; mkdir -p "$d"; cp "$F/plan-vault-seed.jsonl" "$d/resources.jsonl"
+PLAN_DIR="$d" bash "$P"; rc=$?
+check "jsonl manifest renders (rc 0)" "[ $rc -eq 0 ]"
+check "vault-seed golden markdown" "diff -u $F/plan-vault-seed.md $d/plan.md"
+check "headline: 1 to add, 1 to change, 0 to destroy, 8 unchanged" "grep -q '^### 1 to add, 1 to change, 0 to destroy, 8 unchanged$' $d/plan.md"
+check "normalised manifest written beside (plan.normalized.json, never over plan.json)" "[ \"\$(jq -c .summary $d/plan.normalized.json)\" = '{\"add\":1,\"change\":1,\"destroy\":0,\"unchanged\":8}' ] && [ ! -e $d/plan.json ]"
+PLAN_DIR="$d" bash "$P"
+check "rendering is idempotent (a second render does not double the counts)" "diff -u $F/plan-vault-seed.md $d/plan.md"
+check "redacted diff kept verbatim (never a value)" "grep -q 'CHANGE_ME_CLUSTER_NAME = <redacted len=15 sha256:e1f2a3b4>' $d/plan.md"
+check "no 4-space bullet inside <details> (would render as a code block)" "awk '/<details>/{d=1} /<\\/details>/{d=0} d && /^    - /{f=1} END{exit (f?1:0)}' $d/plan.md"
+d="$W/plan2"; mkdir -p "$d"; cp "$F/plan-addons.json" "$d/plan.json"
+PLAN_DIR="$d" bash "$P"; rc=$?
+check "plan.json manifest renders (rc 0)" "[ $rc -eq 0 ]"
+check "addons golden markdown (add/change/destroy/noop/note/error)" "diff -u $F/plan-addons.md $d/plan.md"
+check "supplied summary (99s) ignored — counts recomputed" "grep -q '^### 1 to add, 1 to change, 1 to destroy, 1 unchanged$' $d/plan.md"
+check "error banner" "grep -q 'could not be previewed' $d/plan.md"
+check "destroy verb" "grep -q '# helm-release openobserve/openobserve will be destroyed' $d/plan.md"
+d="$W/plan3"; mkdir -p "$d"; cp "$F/plan-addons.json" "$d/plan.json"; printf '%s\nnot json at all\n' '{"action":"add","type":"file","name":"/etc/x"}' > "$d/resources.jsonl"
+PLAN_DIR="$d" bash "$P"
+check "plan.json + jsonl concatenated" "grep -q '^### 2 to add, 1 to change, 1 to destroy, 1 unchanged$' $d/plan.md"
+check "malformed jsonl line skipped + counted" "grep -q '1 malformed line(s)' $d/plan.md"
+check "diff_file read when diff absent" "printf 'x\n' > $d/df.txt; printf '%s\n' '{\"action\":\"change\",\"type\":\"file\",\"name\":\"df\",\"diff_file\":\"'$d/df.txt'\"}' > $d/resources.jsonl; rm $d/plan.json; PLAN_DIR=$d bash $P && grep -qx x $d/plan.md"
+d="$W/plan4"; mkdir -p "$d"; printf '%s\n' '{"action":"noop","type":"vault-kv","name":"a/b"}' > "$d/resources.jsonl"
+PLAN_DIR="$d" bash "$P"
+check "all-noop → explicit no-op line, no Change details" "grep -q 'nothing to add, change or destroy' $d/plan.md && ! grep -q 'Change details' $d/plan.md"
+d="$W/plan5"; mkdir -p "$d"; PLAN_DIR="$d" bash "$P" >/dev/null 2>&1; rc=$?
+check "no manifest → exit 3, nothing written" "[ $rc -eq 3 ] && [ ! -e $d/plan.md ]"
+d="$W/plan6"; mkdir -p "$d"; { printf '%s' '{"action":"change","type":"k8s","name":"big","diff":"'; for i in $(seq 1 10); do printf 'line%s\\n' "$i"; done; printf '"}\n'; } > "$d/resources.jsonl"
+PLAN_DIR="$d" PLAN_MAX_DIFF_LINES=3 bash "$P"
+check "per-resource diff truncated with a note" "grep -q '✂️ 7 more line(s)' $d/plan.md && ! grep -q '^line9$' $d/plan.md"
+
+echo "== plan/summary (integration)"
+d="$W/plan1" # rendered above
+MODE=preview PHASE=vault-seed TARGET=platform APPLY_CMD='bash scripts/run-phase.sh vault-seed' GATED=true ENVIRONMENT=production \
+  PREVIEW_FILE="$W/preview.md" PREVIEW_RC=0 PLAN_DIR="$d" OUT="$W/s7.md" bash "$A/phase-summary/summary.sh"
+check "plan headline right under ## Preview" "awk '/^## Preview$/{p=NR} p && NR==p+2' $W/s7.md | grep -q '^### 1 to add, 1 to change, 0 to destroy, 8 unchanged$'"
+check "free text demoted to the appendix" "grep -q '<summary>📜 preview output (the command.s stdout, appendix)</summary>' $W/s7.md && grep -q '| a/b | k1, k2 |' $W/s7.md"
+check "plan before appendix" "[ \"\$(grep -n '^### 1 to add' $W/s7.md | cut -d: -f1)\" -lt \"\$(grep -n 'appendix' $W/s7.md | cut -d: -f1)\" ]"
+check "commands table still there" "grep -q '| \`apply\` | \`bash scripts/run-phase.sh vault-seed\` |' $W/s7.md"
+rm -rf "$W/empty"; mkdir -p "$W/empty"
+MODE=preview PHASE=vault-seed TARGET=platform APPLY_CMD='bash scripts/run-phase.sh vault-seed' GATED=true ENVIRONMENT=production \
+  PREVIEW_FILE="$W/preview.md" PREVIEW_RC=0 PLAN_DIR="$W/empty" OUT="$W/s8.md" RUN_URL=https://x/r/1 REF=develop ACTOR=me EVENT=workflow_dispatch bash "$A/phase-summary/summary.sh"
+MODE=preview PHASE=vault-seed TARGET=platform SETUP_CMD='bash scripts/tf-init.sh' PREVIEW_CMD='bash scripts/preview-phase.sh vault-seed' \
+  APPLY_CMD='bash scripts/run-phase.sh vault-seed' GATED=true ENVIRONMENT=production DESTRUCTIVE=false \
+  PREVIEW_FILE="$W/preview.md" PREVIEW_RC=0 RUN_URL=https://x/r/1 REF=develop ACTOR=me EVENT=workflow_dispatch \
+  OUT="$W/s1b.md" bash "$A/phase-summary/summary.sh"
+MODE=preview PHASE=vault-seed TARGET=platform SETUP_CMD='bash scripts/tf-init.sh' PREVIEW_CMD='bash scripts/preview-phase.sh vault-seed' \
+  APPLY_CMD='bash scripts/run-phase.sh vault-seed' GATED=true ENVIRONMENT=production DESTRUCTIVE=false \
+  PREVIEW_FILE="$W/preview.md" PREVIEW_RC=0 RUN_URL=https://x/r/1 REF=develop ACTOR=me EVENT=workflow_dispatch PLAN_DIR="$W/empty" \
+  OUT="$W/s1c.md" bash "$A/phase-summary/summary.sh"
+check "empty PLAN_DIR → byte-identical to no PLAN_DIR (backwards compatible)" "cmp -s $W/s1b.md $W/s1c.md"
+check "no appendix without a manifest" "! grep -q appendix $W/s8.md && grep -q '| a/b | k1, k2 |' $W/s8.md"
+MODE=apply PHASE=vault-seed TARGET=platform APPLY_CMD='bash scripts/run-phase.sh vault-seed' PREVIEW_FILE="$W/preview.md" PLAN_DIR="$d" \
+  APPLY_FILE="$W/apply.out" APPLY_RC=0 OUT="$W/s9.md" bash "$A/phase-summary/summary.sh"
+check "apply mode embeds the approved plan.md" "grep -q '^### 1 to add, 1 to change, 0 to destroy, 8 unchanged$' $W/s9.md"
+check "apply mode keeps the free-text preview collapsed" "grep -q '<summary>🔍 preview output (as shown to the approver)</summary>' $W/s9.md"
 
 echo
 echo "passed=$pass failed=$fail"

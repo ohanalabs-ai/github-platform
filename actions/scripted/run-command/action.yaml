@@ -23,7 +23,7 @@ inputs:
   forward-env:
     description: "Space-separated env var NAMES to forward into the container when set in the job env (values never printed)"
     required: false
-    default: "AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REGION STATE_BUCKET LOCK_TABLE VAULT_ADDR VAULT_TOKEN KUBECONFIG DRY_RUN GITHUB_ACTIONS CI"
+    default: "AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REGION STATE_BUCKET LOCK_TABLE VAULT_ADDR VAULT_TOKEN KUBECONFIG PREVIEW_DIR DRY_RUN GITHUB_ACTIONS CI"
   capture-file:
     description: "Where stdout is captured (default $RUNNER_TEMP/scripted-phase/<title>.out)"
     required: false
