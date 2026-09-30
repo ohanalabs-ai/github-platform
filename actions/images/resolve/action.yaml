@@ -1,0 +1,32 @@
+# 🔎 Resolve ONE plan image to immutable digests (index + selected platform manifests) with
+# the job's isolated DOCKER_CONFIG. Always writes resolved.json (status ok | error + kind).
+name: images-resolve
+description: "Resolve a plan image once to its index/platform digests (oras); classified errors on failure"
+inputs:
+  plan:
+    description: "Path to plan.json"
+    required: true
+  image-id:
+    description: "Plan image id"
+    required: true
+  auth-error:
+    description: "Auth error file written by images/registry-auth (if any)"
+    required: false
+    default: ""
+  out:
+    description: "Output directory for resolved.json"
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: 🔎 resolve digests
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        PLAN: ${{ inputs.plan }}
+        IMAGE_ID: ${{ inputs.image-id }}
+        AUTH_ERROR: ${{ inputs.auth-error }}
+        OUT: ${{ inputs.out }}
+      run: |
+        mkdir -p "$OUT"
+        python3 -m imgsec resolve --plan "$PLAN" --image-id "$IMAGE_ID" --auth-error "$AUTH_ERROR" --out "$OUT"

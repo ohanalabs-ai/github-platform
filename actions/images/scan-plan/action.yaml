@@ -1,0 +1,35 @@
+# 🧮 Bounded scan matrix from the plan + all resolve results (missing/stale/errored images are
+# carried as errors, never dropped). Writes scan-plan.json.
+name: images-scan-plan
+description: "Build the per-image/platform scan matrix from resolve results"
+inputs:
+  plan:
+    description: "Path to plan.json"
+    required: true
+  resolved-dir:
+    description: "Directory holding the downloaded resolve artifacts"
+    required: true
+  out:
+    description: "Output directory for scan-plan.json"
+    required: true
+outputs:
+  count:
+    description: "Number of scan jobs"
+    value: ${{ steps.sp.outputs.count }}
+  matrix:
+    description: "Scan matrix JSON ({include:[{unit,image-id,host}]})"
+    value: ${{ steps.sp.outputs.matrix }}
+runs:
+  using: composite
+  steps:
+    - name: 🧮 scan plan
+      id: sp
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        PLAN: ${{ inputs.plan }}
+        RESOLVED: ${{ inputs.resolved-dir }}
+        OUT: ${{ inputs.out }}
+      run: |
+        mkdir -p "$OUT"
+        python3 -m imgsec scan-plan --plan "$PLAN" --resolved-dir "$RESOLVED" --out "$OUT"

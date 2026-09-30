@@ -1,0 +1,99 @@
+# 🧭 Image plan — render the caller's deployment sources (credential-free), discover every
+# declared image, merge the direct `images` input, validate options → plan.json + matrix.
+# Needs kustomize/helm on PATH for kustomize/helm sources (actions/images/toolchain).
+name: images-plan
+description: "Render + discover + normalize images into a versioned plan (no registry access, no credentials)"
+inputs:
+  images:
+    description: "Single reference, JSON array, or versioned images manifest (see products/devsecops-images/README.md)"
+    required: false
+    default: ""
+  sources:
+    description: "Versioned deployment sources JSON (manifests / kustomize / helm)"
+    required: false
+    default: ""
+  options:
+    description: "Versioned options JSON"
+    required: false
+    default: ""
+  platforms:
+    description: "Default platforms: all | comma-separated os/arch[/variant]"
+    required: false
+    default: "all"
+  sbom-policy:
+    description: "Default SBOM policy: prefer-registry | require-verified | generate"
+    required: false
+    default: "prefer-registry"
+  severity-threshold:
+    description: "Default failing severity: UNKNOWN | LOW | MEDIUM | HIGH | CRITICAL | NONE"
+    required: false
+    default: "HIGH"
+  ignore-unfixed:
+    description: "Default: ignore vulnerabilities without a fixed version when evaluating the threshold"
+    required: false
+    default: "false"
+  root:
+    description: "Directory the sources' relative paths resolve in (the checked-out or downloaded source tree)"
+    required: true
+  source-repository:
+    description: "owner/repo the sources come from (recorded in the inventory)"
+    required: false
+    default: ""
+  source-revision:
+    description: "Exact commit SHA the sources come from (recorded in the inventory)"
+    required: false
+    default: ""
+  source-artifact:
+    description: "Artifact name the sources come from, when rendered by an earlier job (recorded)"
+    required: false
+    default: ""
+  out:
+    description: "Output directory for plan.json"
+    required: true
+outputs:
+  status:
+    description: "ok | error"
+    value: ${{ steps.plan.outputs.status }}
+  fingerprint:
+    description: "Plan fingerprint (ties every later artifact to this plan)"
+    value: ${{ steps.plan.outputs.fingerprint }}
+  count:
+    description: "Number of unique images"
+    value: ${{ steps.plan.outputs.count }}
+  matrix:
+    description: "Resolve matrix JSON ({include:[{id,ref,host}]}) — no secrets"
+    value: ${{ steps.plan.outputs.matrix }}
+  max-parallel:
+    value: ${{ steps.plan.outputs.max-parallel }}
+    description: "options.max-parallel"
+  upload-sarif:
+    value: ${{ steps.plan.outputs.upload-sarif }}
+    description: "options.upload-sarif"
+  report-only:
+    value: ${{ steps.plan.outputs.report-only }}
+    description: "options.report-only"
+runs:
+  using: composite
+  steps:
+    - name: 🧭 render + discover images
+      id: plan
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        IMGSEC_IMAGES: ${{ inputs.images }}
+        IMGSEC_SOURCES: ${{ inputs.sources }}
+        IMGSEC_OPTIONS: ${{ inputs.options }}
+        PLATFORMS: ${{ inputs.platforms }}
+        SBOM_POLICY: ${{ inputs.sbom-policy }}
+        SEVERITY: ${{ inputs.severity-threshold }}
+        IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+        ROOT: ${{ inputs.root }}
+        SRC_REPO: ${{ inputs.source-repository }}
+        SRC_REV: ${{ inputs.source-revision }}
+        SRC_ARTIFACT: ${{ inputs.source-artifact }}
+        OUT: ${{ inputs.out }}
+      run: |
+        mkdir -p "$OUT"
+        python3 -m imgsec plan --platforms "$PLATFORMS" --sbom-policy "$SBOM_POLICY" \
+          --severity-threshold "$SEVERITY" --ignore-unfixed "$IGNORE_UNFIXED" --root "$ROOT" --out "$OUT" \
+          --source-repository "$SRC_REPO" --source-revision "$SRC_REV" --source-artifact "$SRC_ARTIFACT"

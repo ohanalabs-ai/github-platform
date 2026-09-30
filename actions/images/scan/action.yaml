@@ -1,0 +1,50 @@
+# 🛡️ Scan one unit: Trivy on each exact platform digest (the security gate), SBOM per policy
+# (verified registry attestation → else Syft), optional provenance verification. Writes a
+# result.json per target even on errors. Does NOT fail the step on findings — the workflow's
+# gate step does that after the artifacts are uploaded.
+name: images-scan
+description: "Trivy + SBOM + provenance for one scan unit; per-target result.json"
+inputs:
+  plan:
+    description: "Path to plan.json"
+    required: true
+  scan-plan:
+    description: "Path to scan-plan.json"
+    required: true
+  unit:
+    description: "Scan unit id"
+    required: true
+  auth-error:
+    description: "Auth error file written by images/registry-auth (if any)"
+    required: false
+    default: ""
+  github-token:
+    description: "Token for `gh attestation verify` (read-only use)"
+    required: false
+    default: ""
+  out:
+    description: "Output directory"
+    required: true
+outputs:
+  status:
+    description: "pass | policy-fail | error"
+    value: ${{ steps.scan.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - name: 🛡️ trivy + SBOM + provenance
+      id: scan
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_PROMPT_DISABLED: "1"
+        GH_NO_UPDATE_NOTIFIER: "1"
+        PLAN: ${{ inputs.plan }}
+        SCAN_PLAN: ${{ inputs.scan-plan }}
+        UNIT: ${{ inputs.unit }}
+        AUTH_ERROR: ${{ inputs.auth-error }}
+        OUT: ${{ inputs.out }}
+      run: |
+        mkdir -p "$OUT"
+        python3 -m imgsec scan --plan "$PLAN" --scan-plan "$SCAN_PLAN" --unit "$UNIT" --auth-error "$AUTH_ERROR" --out "$OUT"
