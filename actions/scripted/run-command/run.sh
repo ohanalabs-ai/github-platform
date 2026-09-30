@@ -20,7 +20,8 @@
 #   REGISTRY_USER  login user (default github-actions)
 #   FORWARD_ENV    space-separated env var NAMES forwarded into the container when SET in the
 #                  job env (unset names are skipped, values are never printed) — the cloud
-#                  credentials, REGION/STATE_BUCKET/…, VAULT_ADDR/VAULT_TOKEN, KUBECONFIG
+#                  credentials, REGION/STATE_BUCKET/…, VAULT_ADDR/VAULT_TOKEN, KUBECONFIG,
+#                  PREVIEW_DIR (where a preview command writes its plan manifest)
 #   CAPTURE_FILE   where stdout is captured (default $RUNNER_TEMP/scripted-phase/<TITLE>.out)
 #   TITLE          label for the log group and the default capture file name (default command)
 #   ALLOW_FAILURE  "true" → a non-zero exit is reported (output `exit-code`) but does not fail the step

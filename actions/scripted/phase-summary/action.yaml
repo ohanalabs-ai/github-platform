@@ -1,6 +1,7 @@
 # 📝 Compose the scripted-phase summary: identity, the exact commands the apply will run, the
-# captured preview, what happens next (the gate) — or, in the apply job, the approved preview
-# followed by the apply/post output. See summary.sh + README.md.
+# preview — the plan manifest rendered like the Terraform plan comment (plan.sh) when the
+# preview command wrote one, then its free text — and what happens next (the gate); or, in
+# the apply job, the approved preview followed by the apply/post output. See summary.sh + README.md.
 name: scripted-phase-summary
 description: "Render the preview-then-approve markdown for one scripted phase (preview or apply mode)"
 inputs:
@@ -51,6 +52,10 @@ inputs:
     required: false
     default: "0"
     description: "the preview command's exit code"
+  plan-dir:
+    required: false
+    default: ""
+    description: "the preview command's $PREVIEW_DIR (plan.json / resources.jsonl → rendered like the Terraform plan comment; mode=apply embeds its plan.md). Empty / no manifest → free-text preview only"
   apply-file:
     required: false
     default: ""
@@ -84,6 +89,7 @@ runs:
         DESTRUCTIVE: ${{ inputs.destructive }}
         PREVIEW_FILE: ${{ inputs.preview-file }}
         PREVIEW_RC: ${{ inputs.preview-exit-code }}
+        PLAN_DIR: ${{ inputs.plan-dir }}
         APPLY_FILE: ${{ inputs.apply-file }}
         APPLY_RC: ${{ inputs.apply-exit-code }}
         POST_FILE: ${{ inputs.post-file }}

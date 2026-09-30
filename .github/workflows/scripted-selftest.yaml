@@ -1,7 +1,8 @@
 # 🧪 Self-test of the devsecops-scripted product on THIS repo's pull requests: actionlint the
 # reusable workflow, bash -n + shellcheck the composite scripts, then tests/scripted/run-tests.sh
-# — stdout capture / exit-code propagation / env forwarding of run-command, and every shape of
-# the phase summary (gated · ungated · preview-only · destructive · failed preview · apply).
+# — stdout capture / exit-code propagation / env forwarding of run-command, every shape of
+# the phase summary (gated · ungated · preview-only · destructive · failed preview · apply),
+# and the plan-manifest renderer against golden fixtures (tests/scripted/fixtures/plan-*).
 # No docker, no cluster, no secrets.
 name: 🧪 scripted-selftest
 run-name: "🧪 devsecops-scripted self-test — ${{ github.event.pull_request.title || github.ref_name }}"

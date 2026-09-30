@@ -14,6 +14,12 @@
 #   DESTRUCTIVE     true|false — red banner
 #   PREVIEW_FILE    the captured preview markdown (may be missing/empty)
 #   PREVIEW_RC      the preview command's exit code (default 0)
+#   PLAN_DIR        the preview command's plan-manifest directory (its $PREVIEW_DIR: plan.json /
+#                   resources.jsonl — see plan.sh). MODE=preview renders it (→ $PLAN_DIR/plan.md)
+#                   at the top of "## Preview" in the Terraform-plan-comment shape and demotes
+#                   the free-text output to a collapsed appendix; MODE=apply embeds the approved
+#                   $PLAN_DIR/plan.md. Empty / no manifest → the free-text preview alone (the
+#                   pre-manifest output — backwards compatible).
 #   APPLY_FILE, APPLY_RC, POST_FILE   (MODE=apply)
 #   MAX_BYTES       truncate embedded outputs at this size (default 800000; the artifact keeps the whole file)
 #   RUN_URL, REF, ACTOR, EVENT   for the header
@@ -21,12 +27,25 @@
 set -uo pipefail
 MODE="${MODE:-preview}"; PHASE="${PHASE:-?}"; TARGET="${TARGET:-}"
 GATED="${GATED:-true}"; ENVIRONMENT="${ENVIRONMENT:-production}"; DESTRUCTIVE="${DESTRUCTIVE:-false}"
-PREVIEW_FILE="${PREVIEW_FILE:-}"; PREVIEW_RC="${PREVIEW_RC:-0}"
+PREVIEW_FILE="${PREVIEW_FILE:-}"; PREVIEW_RC="${PREVIEW_RC:-0}"; PLAN_DIR="${PLAN_DIR:-}"
 APPLY_FILE="${APPLY_FILE:-}"; APPLY_RC="${APPLY_RC:-0}"; POST_FILE="${POST_FILE:-}"
 MAX_BYTES="${MAX_BYTES:-800000}"
 OUT="${OUT:-/dev/stdout}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 label="$PHASE"; [ -n "$TARGET" ] && label="$PHASE · $TARGET"
+
+# The structured plan, when the preview command wrote one. MODE=preview renders it now (plan.sh
+# → $PLAN_DIR/plan.md + the normalised plan.json, both kept in the artifact); MODE=apply reuses
+# the plan.md the approver saw (downloaded with the artifact). PLAN_MD stays empty otherwise.
+PLAN_MD=""
+if [ -n "$PLAN_DIR" ] && [ -d "$PLAN_DIR" ]; then
+  if [ "$MODE" = preview ]; then
+    if (export PLAN_DIR OUT="$PLAN_DIR/plan.md"; bash "$here/plan.sh"); then PLAN_MD="$PLAN_DIR/plan.md"; fi
+  elif [ -s "$PLAN_DIR/plan.md" ]; then
+    PLAN_MD="$PLAN_DIR/plan.md"
+  fi
+fi
 
 # embed <file> <empty-note> — the file's content, truncated to MAX_BYTES with a note
 embed() {
@@ -86,7 +105,16 @@ cmd_row() { # cmd_row <step> <command>
       echo "> ❌ the preview command exited **${PREVIEW_RC}** — the apply job is blocked (it \`needs\` this job). What it printed:"
       echo
     fi
-    embed "$PREVIEW_FILE" "the preview command printed nothing on stdout"
+    if [ -n "$PLAN_MD" ]; then
+      # the Terraform-plan-comment shape first; the command's free text is the appendix
+      embed "$PLAN_MD" ""
+      echo
+      echo "<details><summary>📜 preview output (the command's stdout, appendix)</summary>"; echo
+      embed "$PREVIEW_FILE" "the preview command printed nothing on stdout"
+      echo; echo "</details>"
+    else
+      embed "$PREVIEW_FILE" "the preview command printed nothing on stdout"
+    fi
     echo
     echo "## Next"
     echo
@@ -101,7 +129,11 @@ cmd_row() { # cmd_row <step> <command>
   else
     echo "## Preview this apply was approved on"
     echo
-    echo "<details><summary>🔍 preview (as shown to the approver)</summary>"; echo
+    if [ -n "$PLAN_MD" ]; then
+      embed "$PLAN_MD" ""
+      echo
+    fi
+    echo "<details><summary>🔍 preview output (as shown to the approver)</summary>"; echo
     embed "$PREVIEW_FILE" "no preview was captured"
     echo; echo "</details>"; echo
     echo "## Apply output"

@@ -1,0 +1,11 @@
+{
+  "summary": {"add": 99, "change": 99, "destroy": 99, "unchanged": 99},
+  "resources": [
+    {"action": "add", "type": "k8s", "name": "apps/v1.Deployment openlit/openlit-pricing", "note": "kustomize addons/product/openlit (server-side)", "diff": "--- /dev/null\n+++ apps/v1.Deployment openlit/openlit-pricing\n@@ -0,0 +1,4 @@\n+apiVersion: apps/v1\n+kind: Deployment\n+metadata:\n+  name: openlit-pricing"},
+    {"action": "change", "type": "k8s", "name": "v1.Secret openlit/openlit-db", "diff": "--- live\n+++ rendered\n(Secret: 2 line(s) differ — values withheld)"},
+    {"action": "noop", "type": "k8s", "name": "v1.ConfigMap openlit/openlit-config"},
+    {"action": "destroy", "type": "helm-release", "name": "openobserve/openobserve", "note": "helm uninstall (present now, chart openobserve-0.14.5)"},
+    {"action": "note", "type": "step", "name": "openlit", "note": "imports the OpenLIT dashboards (hooks/openlit/import-dashboards.sh, non-fatal)"},
+    {"action": "error", "type": "k8s", "name": "kustomize addons/platform/kagent", "note": "kubectl diff failed (exit 2): the CRD Agent is not established yet"}
+  ]
+}

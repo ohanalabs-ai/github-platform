@@ -13,9 +13,14 @@
 #                (READ-ONLY by contract — the caller's script, e.g. `DRY_RUN=1 …`, a
 #                `kubectl diff --server-side`, a Vault KV key-name comparison), and turns its
 #                stdout (markdown) into the step summary + an artifact (+ a sticky PR comment
-#                on pull_request events). The summary also lists, verbatim, every command the
-#                apply will run — so even a phase that cannot be previewed faithfully shows the
-#                approver its inputs and its exact commands.
+#                on pull_request events). A preview command that ALSO writes a PLAN MANIFEST
+#                under $PREVIEW_DIR (plan.json / resources.jsonl — one record per resource:
+#                add|change|destroy|noop, type, name, a redacted unified diff) gets it rendered
+#                like the Terraform plan comment (`### N to add, M to change, K to destroy` →
+#                per-action lists → collapsible ```diff per resource; actions/scripted/phase-summary
+#                plan.sh); its free text becomes the appendix. The summary also lists, verbatim,
+#                every command the apply will run — so even a phase that cannot be previewed
+#                faithfully shows the approver its inputs and its exact commands.
 #   🚀 apply     `needs: preview`; runs in the gated Environment (`environment-name`, default
 #                `production`) so the approver reads the preview IN THE SAME RUN before
 #                clicking approve. Re-prints the approved preview at the top of its log and in
@@ -62,7 +67,7 @@ on:
         required: false
         default: ""
       preview-command:
-        description: "READ-ONLY command whose stdout is the preview (markdown); its exit code blocks the apply when non-zero. Say honestly when a phase cannot be previewed: list its inputs and the exact apply commands."
+        description: "READ-ONLY command whose stdout is the preview (markdown); its exit code blocks the apply when non-zero. May also write a plan manifest to $PREVIEW_DIR (plan.json or resources.jsonl: {action: add|change|destroy|noop|note|error, type, name, note?, diff?}) — rendered like the Terraform plan comment, values redacted by the emitter. Say honestly when a phase cannot be previewed: list its inputs and the exact apply commands."
         type: string
         required: true
       apply-command:
@@ -104,7 +109,7 @@ on:
         description: "Env var NAMES forwarded into the tools image when set (values never printed)"
         type: string
         required: false
-        default: "AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REGION STATE_BUCKET LOCK_TABLE VAULT_ADDR VAULT_TOKEN KUBECONFIG DRY_RUN GITHUB_ACTIONS CI"
+        default: "AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REGION STATE_BUCKET LOCK_TABLE VAULT_ADDR VAULT_TOKEN KUBECONFIG PREVIEW_DIR DRY_RUN GITHUB_ACTIONS CI"
       env:
         description: "NON-SECRET `KEY=VALUE` lines exported in both jobs (e.g. REGION, STATE_BUCKET, VAULT_ADDR from the caller's variables)"
         type: string
@@ -248,8 +253,11 @@ jobs:
         env:
           ENV_LINES: ${{ inputs.env }}
         run: |
-          mkdir -p "$RUNNER_TEMP/scripted-phase"
+          mkdir -p "$RUNNER_TEMP/scripted-phase/preview"
           echo "KUBECONFIG=$RUNNER_TEMP/scripted-phase/kubeconfig" >> "$GITHUB_ENV"
+          # the preview command's plan manifest lands here (plan.json / resources.jsonl); $RUNNER_TEMP
+          # is mounted at the same path inside the tools image, so PREVIEW_DIR is valid on both sides
+          echo "PREVIEW_DIR=$RUNNER_TEMP/scripted-phase/preview" >> "$GITHUB_ENV"
           # one KEY=VALUE per line; blank lines and #-comments skipped; names printed, values not
           while IFS= read -r line; do
             case "$line" in ''|'#'*) continue ;; esac
@@ -368,6 +376,7 @@ jobs:
           destructive: ${{ inputs.destructive }}
           preview-file: ${{ runner.temp }}/scripted-phase/preview.md
           preview-exit-code: ${{ steps.preview.outputs.exit-code || '1' }}
+          plan-dir: ${{ runner.temp }}/scripted-phase/preview
           out: ${{ runner.temp }}/scripted-phase/summary.md
 
       - name: 📝 step summary
@@ -382,6 +391,10 @@ jobs:
           path: |
             ${{ runner.temp }}/scripted-phase/preview.md
             ${{ runner.temp }}/scripted-phase/summary.md
+            ${{ runner.temp }}/scripted-phase/preview/plan.md
+            ${{ runner.temp }}/scripted-phase/preview/plan.normalized.json
+            ${{ runner.temp }}/scripted-phase/preview/plan.json
+            ${{ runner.temp }}/scripted-phase/preview/resources.jsonl
           if-no-files-found: warn
           retention-days: 30
 
@@ -426,6 +439,7 @@ jobs:
       - name: 🔍 preview this apply was approved on
         run: |
           echo "::group::🔍 preview (as shown to the approver)"
+          [ -s "$RUNNER_TEMP/scripted-phase/approved/preview/plan.md" ] && cat "$RUNNER_TEMP/scripted-phase/approved/preview/plan.md" && echo
           cat "$RUNNER_TEMP/scripted-phase/approved/preview.md" 2>/dev/null || echo "(no preview captured)"
           echo "::endgroup::"
 
@@ -561,6 +575,7 @@ jobs:
           environment-name: ${{ inputs.environment-name }}
           destructive: ${{ inputs.destructive }}
           preview-file: ${{ runner.temp }}/scripted-phase/approved/preview.md
+          plan-dir: ${{ runner.temp }}/scripted-phase/approved/preview
           apply-file: ${{ runner.temp }}/scripted-phase/apply.out
           apply-exit-code: ${{ steps.apply.outputs.exit-code || '1' }}
           post-file: ${{ runner.temp }}/scripted-phase/post.out
