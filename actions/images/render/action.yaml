@@ -1,0 +1,27 @@
+# 🧩 Render a sources document (manifests / kustomize / helm) to ONE multi-document YAML file,
+# with the same restrictions as the scan's plan step (no cluster, no plugins, no unpinned
+# remotes, paths confined to `root`). The file is written 0600: rendered output can contain
+# Secrets — do not upload or log it unprotected. Needs kustomize/helm (actions/images/toolchain).
+name: images-render
+description: "Render deployment sources to a multi-document YAML file (restricted, offline)"
+inputs:
+  sources:
+    description: "Versioned sources JSON (same schema as the scan's `sources` input)"
+    required: true
+  root:
+    description: "Source tree the relative paths resolve in"
+    required: true
+  out:
+    description: "Output YAML file"
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: 🧩 render
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        IMGSEC_SOURCES: ${{ inputs.sources }}
+        ROOT: ${{ inputs.root }}
+        OUT: ${{ inputs.out }}
+      run: python3 -m imgsec render --root "$ROOT" --out "$OUT"

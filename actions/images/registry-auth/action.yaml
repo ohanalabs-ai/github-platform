@@ -1,0 +1,105 @@
+# 🔐 Registry auth for EXACTLY ONE registry host — the host of the plan image `image-id`.
+# The caller-supplied registry-auth profiles (trusted workflow input, never image/sources
+# data) map host → anonymous | github-token (ghcr.io) | secret | vault. Only the credential
+# for that host is fetched; it is written to an isolated 0600 DOCKER_CONFIG under
+# $RUNNER_TEMP (exported for later steps) and never to outputs. Failures are recorded in
+# `error-file` so the resolve/scan step can write a classified result (kind auth).
+# Run `step: cleanup` with `if: always()` at the end of the job.
+name: images-registry-auth
+description: "Per-host registry credentials (anonymous / GITHUB_TOKEN / secret / Vault KV via GitHub OIDC) into an isolated DOCKER_CONFIG"
+inputs:
+  step:
+    description: "login | cleanup"
+    required: false
+    default: "login"
+  plan:
+    description: "Path to plan.json"
+    required: false
+    default: ""
+  image-id:
+    description: "Plan image id whose registry host is authenticated"
+    required: false
+    default: ""
+  profiles:
+    description: "Registry auth profiles JSON (trusted caller input)"
+    required: false
+    default: ""
+  github-token:
+    description: "Token used only for `github-token` profiles (ghcr.io)"
+    required: false
+    default: ""
+  registry-credentials-json:
+    description: "Secret: {\"<host[:port]>\": {\"username\": …, \"password\": …}} for `secret` profiles"
+    required: false
+    default: ""
+  dockerhub-username:
+    description: "Secret: Docker Hub user for the docker.io `secret`/dockerhub profile"
+    required: false
+    default: ""
+  dockerhub-token:
+    description: "Secret: Docker Hub access token for the docker.io `secret`/dockerhub profile"
+    required: false
+    default: ""
+  error-file:
+    description: "Where a classified auth error is written"
+    required: false
+    default: ""
+outputs:
+  mode:
+    description: "anonymous | github-token | secret | vault | error"
+    value: ${{ steps.select.outputs.mode }}
+runs:
+  using: composite
+  steps:
+    - name: 🔎 select auth profile for the image's registry host
+      id: select
+      if: inputs.step == 'login'
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        IMGSEC_AUTH_PROFILES: ${{ inputs.profiles }}
+        PLAN: ${{ inputs.plan }}
+        IMAGE_ID: ${{ inputs.image-id }}
+        ERROR_FILE: ${{ inputs.error-file }}
+      run: python3 -m imgsec auth-select --plan "$PLAN" --image-id "$IMAGE_ID" --error-file "$ERROR_FILE"
+
+    - name: 🔐 registry credential from Vault KV (GitHub OIDC)
+      id: vault
+      if: inputs.step == 'login' && steps.select.outputs.mode == 'vault'
+      uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+      with:
+        url: ${{ steps.select.outputs.vault-url }}
+        method: jwt
+        path: ${{ steps.select.outputs.vault-auth-path }}
+        role: ${{ steps.select.outputs.vault-role }}
+        jwtGithubAudience: ${{ steps.select.outputs.vault-audience }}
+        namespace: ${{ steps.select.outputs.vault-namespace }}
+        tlsSkipVerify: false
+        exportEnv: false
+        exportToken: false
+        secrets: ${{ steps.select.outputs.vault-secrets }}
+
+    - name: 🗝️ isolated DOCKER_CONFIG for this host only
+      if: always() && inputs.step == 'login' && steps.select.outputs.mode != 'error' && steps.select.outputs.mode != ''
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        IMGSEC_AUTH_MODE: ${{ steps.select.outputs.mode }}
+        IMGSEC_HOST: ${{ steps.select.outputs.host }}
+        IMGSEC_SECRET_SOURCE: ${{ steps.select.outputs.secret-source }}
+        IMGSEC_GITHUB_TOKEN: ${{ steps.select.outputs.mode == 'github-token' && inputs.github-token || '' }}
+        IMGSEC_GITHUB_ACTOR: ${{ github.actor }}
+        IMGSEC_REG_USERNAME: ${{ steps.select.outputs.mode == 'vault' && steps.vault.outputs.IMGSEC_REG_USERNAME || '' }}
+        IMGSEC_REG_PASSWORD: ${{ steps.select.outputs.mode == 'vault' && steps.vault.outputs.IMGSEC_REG_PASSWORD || '' }}
+        REGISTRY_CREDENTIALS_JSON: ${{ steps.select.outputs.mode == 'secret' && steps.select.outputs.secret-source == 'registry-credentials-json' && inputs.registry-credentials-json || '' }}
+        DOCKERHUB_USERNAME: ${{ steps.select.outputs.mode == 'secret' && steps.select.outputs.secret-source == 'dockerhub' && inputs.dockerhub-username || '' }}
+        DOCKERHUB_TOKEN: ${{ steps.select.outputs.mode == 'secret' && steps.select.outputs.secret-source == 'dockerhub' && inputs.dockerhub-token || '' }}
+        ERROR_FILE: ${{ inputs.error-file }}
+      run: python3 -m imgsec auth-write --error-file "$ERROR_FILE"
+
+    - name: 🧹 remove the isolated DOCKER_CONFIG
+      if: inputs.step == 'cleanup'
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+      run: python3 -m imgsec auth-cleanup

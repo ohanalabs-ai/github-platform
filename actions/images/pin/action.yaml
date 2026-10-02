@@ -1,0 +1,63 @@
+# 📌 Structured digest pinning of rendered manifests (image fields only, never text replace):
+# a digest-lock.json from the scan report, or a {images:[{match,pinned}]} mapping. Checks
+# --expect / --forbid / --require-digest; refuses Secrets unless allow-secrets. The output
+# is written 0600 — it is the full rendered configuration; never upload it unprotected.
+name: images-pin
+description: "Pin image fields of rendered manifests to scanned/built digests, with coverage checks"
+inputs:
+  manifests:
+    description: "Rendered multi-document YAML file"
+    required: true
+  mapping:
+    description: "digest-lock.json or mapping JSON file"
+    required: false
+    default: ""
+  out:
+    description: "Output YAML file"
+    required: true
+  report:
+    description: "Optional JSON report of replacements"
+    required: false
+    default: ""
+  expect:
+    description: "JSON array of references that must appear in the output"
+    required: false
+    default: ""
+  forbid:
+    description: "JSON array of references that must not remain"
+    required: false
+    default: ""
+  adapters:
+    description: "JSON array of CRD adapters (same schema as sources.adapters)"
+    required: false
+    default: ""
+  require-digest:
+    description: "Every image field must carry a digest"
+    required: false
+    default: "false"
+  allow-secrets:
+    description: "Allow Secret objects in the output (then protect the file)"
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: 📌 pin digests
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        MANIFESTS: ${{ inputs.manifests }}
+        MAPPING: ${{ inputs.mapping }}
+        OUT: ${{ inputs.out }}
+        REPORT: ${{ inputs.report }}
+        EXPECT: ${{ inputs.expect }}
+        FORBID: ${{ inputs.forbid }}
+        ADAPTERS: ${{ inputs.adapters }}
+        REQUIRE_DIGEST: ${{ inputs.require-digest }}
+        ALLOW_SECRETS: ${{ inputs.allow-secrets }}
+      run: |
+        args=(--manifests "$MANIFESTS" --out "$OUT" --report "$REPORT" --mapping "$MAPPING"
+              --expect-json "$EXPECT" --forbid-json "$FORBID" --adapters-json "$ADAPTERS")
+        [ "$REQUIRE_DIGEST" = true ] && args+=(--require-digest)
+        [ "$ALLOW_SECRETS" = true ] && args+=(--allow-secrets)
+        python3 -m imgsec pin "${args[@]}"

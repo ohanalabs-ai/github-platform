@@ -11,3 +11,7 @@ paths:
   .github/workflows/scripted-phase.yaml:
     ignore:
       - 'property "(job_)?workflow_sha" is not defined in object type'
+  # docker-images-devsecops-scan.yaml (devsecops-images) checks out its actions/images/* the same way.
+  .github/workflows/docker-images-devsecops-scan.yaml:
+    ignore:
+      - 'property "(job_)?workflow_sha" is not defined in object type'

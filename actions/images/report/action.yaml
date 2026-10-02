@@ -1,0 +1,51 @@
+# 📋 Aggregate report: every planned image/target must have a current result (missing → error).
+# Writes report.md, report.json, inventory.json, digest-lock.json (+ kustomize-images.yaml).
+name: images-report
+description: "Consolidated Markdown + machine-readable inventory and digest lock; fails closed on missing results"
+inputs:
+  plan:
+    description: "Path to plan.json"
+    required: true
+  scan-plan:
+    description: "Path to scan-plan.json (may not exist)"
+    required: false
+    default: ""
+  resolved-dir:
+    description: "Directory with downloaded resolve artifacts"
+    required: false
+    default: ""
+  results-dir:
+    description: "Directory with downloaded scan artifacts"
+    required: false
+    default: ""
+  needs:
+    description: "toJSON(needs) of the report job"
+    required: false
+    default: "{}"
+  out:
+    description: "Output directory"
+    required: true
+outputs:
+  status:
+    description: "pass | policy-fail | error"
+    value: ${{ steps.report.outputs.status }}
+  failed:
+    description: "true when the run must fail (error, or policy-fail without report-only)"
+    value: ${{ steps.report.outputs.failed }}
+runs:
+  using: composite
+  steps:
+    - name: 📋 aggregate
+      id: report
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        IMGSEC_NEEDS: ${{ inputs.needs }}
+        PLAN: ${{ inputs.plan }}
+        SCAN_PLAN: ${{ inputs.scan-plan }}
+        RESOLVED: ${{ inputs.resolved-dir }}
+        RESULTS: ${{ inputs.results-dir }}
+        OUT: ${{ inputs.out }}
+      run: |
+        python3 -m imgsec report --plan "$PLAN" --scan-plan "$SCAN_PLAN" --resolved-dir "$RESOLVED" \
+          --results-dir "$RESULTS" --out "$OUT"

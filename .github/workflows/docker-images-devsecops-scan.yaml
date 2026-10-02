@@ -1,0 +1,582 @@
+# 🛡️ Reusable, manifest-driven container image security scan — the devsecops-images product
+# (products/devsecops-images/README.md).
+#
+#   🧭 plan        credential-free: check out the caller's deployment source at an explicit
+#                  repo/ref (or download a same-run artifact of rendered/built manifests),
+#                  RENDER it (kustomize build / helm template — no cluster, no plugins, no
+#                  unpinned remotes), discover every declared image from structured PodSpec
+#                  fields, merge the direct `images` input → plan.json (+ resolve matrix)
+#   🔎 resolve     one job per unique image: per-host auth → resolve the reference ONCE to its
+#                  index + selected platform manifest digests
+#   🧮 scan-plan   bounded per-image/platform matrix; images that failed to resolve are carried
+#   🛡️ scan        one job per target (or per image when over options.max-scan-jobs): Trivy on the
+#                  exact platform digest (the gate), SBOM (verified registry attestation → else
+#                  Syft), optional provenance verification; results uploaded BEFORE the gate
+#   📋 report      always runs: every planned image/target must have a current result (missing
+#                  → error); report.md, inventory.json, digest-lock.json
+#   📤 sarif       optional (options.upload-sarif) — never a prerequisite of the report
+#
+# Helper code (actions/images/*) is checked out from THIS repository at the SAME commit as this
+# workflow file (`job.workflow_sha`), never from the caller's checkout. Third-party actions are
+# pinned by commit SHA; tools are checksum/GPG-verified (actions/images/toolchain).
+#
+# Permissions: plan/report request only `contents: read`. resolve/scan/sarif declare none, so
+# they get exactly what the CALLER's job grants — add `packages: read` for ghcr.io profiles,
+# `id-token: write` only when a Vault profile is used, `security-events: write` only with
+# upload-sarif. Nothing here needs `secrets: inherit`; pass the optional secrets explicitly.
+name: 🛡️ docker-images-devsecops-scan
+run-name: "🛡️ image scan — ${{ github.event_name }} ${{ github.ref_name }}"
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: "Image reference, JSON array of references, or versioned images manifest ({\"version\":1,…})"
+        type: string
+        required: false
+        default: ""
+      sources:
+        description: "Versioned deployment sources JSON: raw manifests / kustomize overlay / helm chart (rendered, then discovered)"
+        type: string
+        required: false
+        default: ""
+      source-repository:
+        description: "owner/repo holding the sources (default: the calling repository)"
+        type: string
+        required: false
+        default: ""
+      source-ref:
+        description: "Branch, tag or SHA of source-repository (default: the calling commit for the calling repository)"
+        type: string
+        required: false
+        default: ""
+      source-artifact:
+        description: "Name of an artifact from THIS workflow run holding the source tree (e.g. rendered/pinned manifests from a build job); exclusive with source-repository/ref"
+        type: string
+        required: false
+        default: ""
+      registry-auth-profiles:
+        description: "Versioned per-host auth profiles JSON (anonymous | github-token | secret | vault) — no credential values"
+        type: string
+        required: false
+        default: ""
+      platforms:
+        description: "Default platforms: all | comma-separated os/arch[/variant] (a requested platform missing from an image fails it)"
+        type: string
+        required: false
+        default: "all"
+      sbom-policy:
+        description: "prefer-registry | require-verified | generate"
+        type: string
+        required: false
+        default: "prefer-registry"
+      severity-threshold:
+        description: "UNKNOWN | LOW | MEDIUM | HIGH | CRITICAL | NONE (report only)"
+        type: string
+        required: false
+        default: "HIGH"
+      ignore-unfixed:
+        description: "Ignore vulnerabilities without a fixed version when applying the threshold (all stay in the results)"
+        type: boolean
+        required: false
+        default: false
+      options:
+        description: "Versioned options JSON (allowed-registries, allow-empty, max-parallel, max-scan-jobs, upload-sarif, report-only, trivy, attestation-signers, provenance, allow-credentials-on-pull-request)"
+        type: string
+        required: false
+        default: ""
+      artifact-prefix:
+        description: "Prefix for every artifact of this call — use a distinct one per call when calling more than once in a run"
+        type: string
+        required: false
+        default: "imgsec"
+    secrets:
+      REGISTRY_CREDENTIALS_JSON:
+        description: "{\"<host[:port]>\": {\"username\": …, \"password\": …}} for `secret` profiles (read only at the exact host)"
+        required: false
+      DOCKERHUB_USERNAME:
+        description: "Docker Hub user for the docker.io `secret`/dockerhub profile"
+        required: false
+      DOCKERHUB_TOKEN:
+        description: "Docker Hub access token for the docker.io `secret`/dockerhub profile"
+        required: false
+      SOURCE_REPO_TOKEN:
+        description: "Read-only token to check out a private source-repository (never used for registries)"
+        required: false
+    outputs:
+      status:
+        description: "pass | policy-fail | error"
+        value: ${{ jobs.report.outputs.status }}
+      report-artifact:
+        description: "Name of the report artifact (report.md, report.json, inventory.json, digest-lock.json)"
+        value: ${{ jobs.report.outputs.artifact }}
+      plan-fingerprint:
+        description: "Fingerprint of the plan every result is tied to"
+        value: ${{ jobs.plan.outputs.fingerprint }}
+  workflow_dispatch:
+    inputs:
+      images:
+        description: "Image reference, JSON array, or versioned images manifest"
+        type: string
+        required: false
+        default: ""
+      sources:
+        description: "Versioned deployment sources JSON"
+        type: string
+        required: false
+        default: ""
+      source-repository:
+        description: "owner/repo holding the sources (default: this repository)"
+        type: string
+        required: false
+        default: ""
+      source-ref:
+        description: "Branch, tag or SHA of source-repository"
+        type: string
+        required: false
+        default: ""
+      registry-auth-profiles:
+        description: "Per-host auth profiles JSON (Vault profiles need a caller granting id-token: write — see README)"
+        type: string
+        required: false
+        default: ""
+      platforms:
+        description: "all | os/arch[,os/arch…]"
+        type: string
+        required: false
+        default: "all"
+      sbom-policy:
+        description: "SBOM policy"
+        type: choice
+        options: [prefer-registry, require-verified, generate]
+        default: prefer-registry
+      severity-threshold:
+        description: "Failing severity"
+        type: choice
+        options: [CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN, NONE]
+        default: HIGH
+      ignore-unfixed:
+        description: "Ignore unfixed vulnerabilities for the threshold"
+        type: boolean
+        default: false
+      options:
+        description: "Versioned options JSON"
+        type: string
+        required: false
+        default: ""
+
+env:
+  PLATFORM_REPO: ohanalabs-ai/github-platform
+  PLATFORM_DIR: .imgsec-platform
+  PREFIX: ${{ inputs.artifact-prefix || 'imgsec' }}
+  WORK: ${{ github.workspace }}/.imgsec-work
+
+jobs:
+  plan:
+    name: 🧭 plan (render + discover)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      status: ${{ steps.plan.outputs.status }}
+      fingerprint: ${{ steps.plan.outputs.fingerprint }}
+      count: ${{ steps.plan.outputs.count }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      max-parallel: ${{ steps.plan.outputs.max-parallel }}
+      upload-sarif: ${{ steps.plan.outputs.upload-sarif }}
+      report-only: ${{ steps.plan.outputs.report-only }}
+    steps:
+      - name: 📥 image-security helpers (this workflow's commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+          persist-credentials: false
+
+      - name: ✅ validate source selection
+        id: src
+        shell: bash
+        env:
+          SRC_REPO: ${{ inputs.source-repository }}
+          SRC_REF: ${{ inputs.source-ref }}
+          SRC_ARTIFACT: ${{ inputs.source-artifact }}
+          SOURCES: ${{ inputs.sources }}
+          CALLER_REPO: ${{ github.repository }}
+          CALLER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PREFIX" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "::error::artifact-prefix must match ^[a-z0-9][a-z0-9-]{0,39}$"; exit 1; }
+          if [ -n "$SRC_ARTIFACT" ]; then
+            [ -z "$SRC_REPO$SRC_REF" ] || { echo "::error::source-artifact is exclusive with source-repository/source-ref"; exit 1; }
+            [[ "$SRC_ARTIFACT" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error::source-artifact must be an artifact name"; exit 1; }
+            echo "mode=artifact" >> "$GITHUB_OUTPUT"
+          elif [ -n "$SOURCES" ]; then
+            repo="${SRC_REPO:-$CALLER_REPO}"
+            [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::source-repository must be owner/repo"; exit 1; }
+            ref="$SRC_REF"
+            if [ -z "$ref" ] && [ "$repo" = "$CALLER_REPO" ]; then ref="$CALLER_SHA"; fi
+            [[ -z "$ref" || "$ref" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || { echo "::error::source-ref has unexpected characters"; exit 1; }
+            { echo "mode=checkout"; echo "repository=$repo"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p "$WORK/source" "$WORK/plan"
+
+      - name: 📥 deployment source (explicit repo/ref — no credentials persisted)
+        if: steps.src.outputs.mode == 'checkout'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.src.outputs.repository }}
+          ref: ${{ steps.src.outputs.ref }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          path: .imgsec-work/source
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: 📥 deployment source (artifact from this run)
+        if: steps.src.outputs.mode == 'artifact'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.source-artifact }}
+          path: .imgsec-work/source
+
+      - name: 📌 source revision
+        id: rev
+        if: steps.src.outputs.mode == 'checkout'
+        shell: bash
+        run: echo "sha=$(git -C "$WORK/source" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 🧰 kustomize + helm (verified)
+        if: inputs.sources != ''
+        uses: ./.imgsec-platform/actions/images/toolchain
+        with:
+          tools: kustomize helm
+
+      - name: 🧭 render + discover
+        id: plan
+        uses: ./.imgsec-platform/actions/images/plan
+        with:
+          images: ${{ inputs.images }}
+          sources: ${{ inputs.sources }}
+          options: ${{ inputs.options }}
+          platforms: ${{ inputs.platforms }}
+          sbom-policy: ${{ inputs.sbom-policy }}
+          severity-threshold: ${{ inputs.severity-threshold }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          root: ${{ env.WORK }}/source
+          source-repository: ${{ steps.src.outputs.repository }}
+          source-revision: ${{ steps.rev.outputs.sha }}
+          source-artifact: ${{ inputs.source-artifact }}
+          out: ${{ env.WORK }}/plan
+
+      - name: 📤 plan
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PREFIX }}-plan
+          path: ${{ env.WORK }}/plan/plan.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  resolve:
+    name: 🔎 resolve ${{ matrix.ref }}
+    needs: plan
+    if: needs.plan.outputs.status == 'ok' && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: 📥 image-security helpers (this workflow's commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+          persist-credentials: false
+
+      - name: 📥 plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PREFIX }}-plan
+          path: .imgsec-work/plan
+
+      - name: 🧰 oras (verified)
+        uses: ./.imgsec-platform/actions/images/toolchain
+        with:
+          tools: oras
+
+      - name: 🔐 registry auth (this image's host only)
+        id: auth
+        uses: ./.imgsec-platform/actions/images/registry-auth
+        with:
+          plan: ${{ env.WORK }}/plan/plan.json
+          image-id: ${{ matrix.id }}
+          profiles: ${{ inputs.registry-auth-profiles }}
+          github-token: ${{ github.token }}
+          registry-credentials-json: ${{ secrets.REGISTRY_CREDENTIALS_JSON }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          error-file: ${{ runner.temp }}/imgsec-auth-error.json
+
+      - name: 🔎 resolve digests
+        if: ${{ !cancelled() }}
+        uses: ./.imgsec-platform/actions/images/resolve
+        with:
+          plan: ${{ env.WORK }}/plan/plan.json
+          image-id: ${{ matrix.id }}
+          auth-error: ${{ runner.temp }}/imgsec-auth-error.json
+          out: ${{ env.WORK }}/resolve
+
+      - name: 📤 resolve result
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PREFIX }}-resolve-${{ matrix.id }}
+          path: ${{ env.WORK }}/resolve/resolved.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: 🧹 registry credentials
+        if: always()
+        uses: ./.imgsec-platform/actions/images/registry-auth
+        with:
+          step: cleanup
+
+  scan-plan:
+    name: 🧮 scan plan
+    needs: [plan, resolve]
+    if: always() && needs.plan.outputs.status == 'ok' && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      count: ${{ steps.sp.outputs.count }}
+      matrix: ${{ steps.sp.outputs.matrix }}
+    steps:
+      - name: 📥 image-security helpers (this workflow's commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+          persist-credentials: false
+
+      - name: 📥 plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PREFIX }}-plan
+          path: .imgsec-work/plan
+
+      - name: 📥 resolve results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ env.PREFIX }}-resolve-*
+          path: .imgsec-work/resolved
+
+      - name: 🧮 scan plan
+        id: sp
+        uses: ./.imgsec-platform/actions/images/scan-plan
+        with:
+          plan: ${{ env.WORK }}/plan/plan.json
+          resolved-dir: ${{ env.WORK }}/resolved
+          out: ${{ env.WORK }}/scan-plan
+
+      - name: 📤 scan plan
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PREFIX }}-scan-plan
+          path: ${{ env.WORK }}/scan-plan/scan-plan.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  scan:
+    name: 🛡️ scan ${{ matrix.unit }}
+    needs: [plan, scan-plan]
+    if: always() && needs.scan-plan.result == 'success' && needs.scan-plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}
+      matrix: ${{ fromJSON(needs.scan-plan.outputs.matrix) }}
+    steps:
+      - name: 📥 image-security helpers (this workflow's commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+          persist-credentials: false
+
+      - name: 📥 plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PREFIX }}-plan
+          path: .imgsec-work/plan
+
+      - name: 📥 scan plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PREFIX }}-scan-plan
+          path: .imgsec-work/scan-plan
+
+      - name: 🧰 trivy · syft · cosign · gh · oras (verified)
+        uses: ./.imgsec-platform/actions/images/toolchain
+        with:
+          tools: trivy syft cosign gh oras
+
+      - name: 🔐 registry auth (this image's host only)
+        id: auth
+        uses: ./.imgsec-platform/actions/images/registry-auth
+        with:
+          plan: ${{ env.WORK }}/plan/plan.json
+          image-id: ${{ matrix.image-id }}
+          profiles: ${{ inputs.registry-auth-profiles }}
+          github-token: ${{ github.token }}
+          registry-credentials-json: ${{ secrets.REGISTRY_CREDENTIALS_JSON }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          error-file: ${{ runner.temp }}/imgsec-auth-error.json
+
+      - name: 🛡️ trivy + SBOM + provenance
+        id: scan
+        if: ${{ !cancelled() }}
+        uses: ./.imgsec-platform/actions/images/scan
+        with:
+          plan: ${{ env.WORK }}/plan/plan.json
+          scan-plan: ${{ env.WORK }}/scan-plan/scan-plan.json
+          unit: ${{ matrix.unit }}
+          auth-error: ${{ runner.temp }}/imgsec-auth-error.json
+          github-token: ${{ github.token }}
+          out: ${{ env.WORK }}/scan
+
+      - name: 📤 scan results (before the gate)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PREFIX }}-result-${{ matrix.unit }}
+          path: ${{ env.WORK }}/scan
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: 🧹 registry credentials
+        if: always()
+        uses: ./.imgsec-platform/actions/images/registry-auth
+        with:
+          step: cleanup
+
+      - name: 🚦 gate
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          STATUS: ${{ steps.scan.outputs.status }}
+          REPORT_ONLY: ${{ needs.plan.outputs.report-only }}
+        run: |
+          case "$STATUS" in
+            pass) echo "✅ pass" ;;
+            policy-fail) if [ "$REPORT_ONLY" = true ]; then echo "❌ policy-fail (report-only)"; else echo "::error::policy failure — see the results"; exit 1; fi ;;
+            *) echo "::error::scan status '${STATUS:-missing}' — see the results"; exit 1 ;;
+          esac
+
+  report:
+    name: 📋 report
+    needs: [plan, resolve, scan-plan, scan]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      status: ${{ steps.report.outputs.status }}
+      artifact: ${{ env.PREFIX }}-report
+    steps:
+      - name: 📥 image-security helpers (this workflow's commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+          persist-credentials: false
+
+      # pattern downloads never fail on "not found": a missing plan/scan-plan/result is
+      # detected (and fails the report) by the aggregator, not by a download error.
+      - name: 📥 plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ env.PREFIX }}-plan
+          path: .imgsec-work/plans
+          merge-multiple: true
+
+      - name: 📥 scan plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ env.PREFIX }}-scan-plan
+          path: .imgsec-work/plans
+          merge-multiple: true
+
+      - name: 📥 resolve results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ env.PREFIX }}-resolve-*
+          path: .imgsec-work/resolved
+
+      - name: 📥 scan results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ env.PREFIX }}-result-*
+          path: .imgsec-work/results
+
+      - name: 📋 aggregate
+        id: report
+        uses: ./.imgsec-platform/actions/images/report
+        with:
+          plan: ${{ env.WORK }}/plans/plan.json
+          scan-plan: ${{ env.WORK }}/plans/scan-plan.json
+          resolved-dir: ${{ env.WORK }}/resolved
+          results-dir: ${{ env.WORK }}/results
+          needs: ${{ toJSON(needs) }}
+          out: ${{ env.WORK }}/report
+
+      - name: 📤 report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PREFIX }}-report
+          path: ${{ env.WORK }}/report
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      - name: 🚦 overall
+        if: always()
+        shell: bash
+        env:
+          STATUS: ${{ steps.report.outputs.status }}
+          FAILED: ${{ steps.report.outputs.failed }}
+        run: |
+          echo "overall: ${STATUS:-missing}"
+          [ "$FAILED" = false ] || { echo "::error::image scan ${STATUS:-did not produce a report}"; exit 1; }
+
+  sarif:
+    name: 📤 SARIF → code scanning
+    needs: [plan, scan-plan, scan]
+    if: always() && needs.plan.outputs.upload-sarif == 'true' && needs.scan-plan.result == 'success' && needs.scan-plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 scan results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ env.PREFIX }}-result-*
+          path: .imgsec-work/results
+
+      - name: 📤 upload (one run per image/platform, category imgsec/<target>)
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: .imgsec-work/results

@@ -1,0 +1,97 @@
+# 🗺️ Checked-in build map operations for reference builds (see imgsec/buildmap.py):
+#   validate — map ↔ skaffold.yaml ↔ Dockerfiles at the pinned revision → build matrix
+#   record   — one build's pushed digest → a build record file
+#   assemble — all build records → builds.json, mapping.json, expect/forbid lists,
+#              images-annotate.json (+ optional kustomize overlay with digest images)
+name: images-buildmap
+description: "Validate a build map against the source, record builds, and assemble digest mappings"
+inputs:
+  action:
+    description: "validate | record | assemble"
+    required: true
+  map:
+    description: "Build map JSON file"
+    required: true
+  root:
+    description: "Checked-out source tree"
+    required: false
+    default: "."
+  revision:
+    description: "Checked-out commit (validate)"
+    required: false
+    default: ""
+  include-optional:
+    description: "Include optional services (e.g. loadgenerator)"
+    required: false
+    default: "false"
+  service:
+    description: "Service name (record)"
+    required: false
+    default: ""
+  registry:
+    description: "Destination registry host[:port]"
+    required: false
+    default: ""
+  namespace:
+    description: "Destination repository namespace"
+    required: false
+    default: ""
+  tag:
+    description: "Unique build tag"
+    required: false
+    default: ""
+  digest:
+    description: "Pushed digest (record)"
+    required: false
+    default: ""
+  records-dir:
+    description: "Directory of build records (assemble)"
+    required: false
+    default: ""
+  kustomize-overlay:
+    description: "Overlay directory (relative to root) to generate (assemble)"
+    required: false
+    default: ""
+  out:
+    description: "Output file (record) or directory (assemble)"
+    required: false
+    default: ""
+outputs:
+  matrix:
+    description: "Build matrix JSON (validate)"
+    value: ${{ steps.bm.outputs.matrix }}
+  services:
+    description: "Selected service names JSON (validate)"
+    value: ${{ steps.bm.outputs.services }}
+  expect:
+    description: "JSON array of expected pinned references (assemble)"
+    value: ${{ steps.bm.outputs.expect }}
+  forbid:
+    description: "JSON array of references that must not remain (assemble)"
+    value: ${{ steps.bm.outputs.forbid }}
+runs:
+  using: composite
+  steps:
+    - name: 🗺️ build map ${{ inputs.action }}
+      id: bm
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../lib
+        ACTION: ${{ inputs.action }}
+        MAP: ${{ inputs.map }}
+        ROOT: ${{ inputs.root }}
+        REVISION: ${{ inputs.revision }}
+        INCLUDE_OPTIONAL: ${{ inputs.include-optional }}
+        SERVICE: ${{ inputs.service }}
+        REGISTRY: ${{ inputs.registry }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TAG: ${{ inputs.tag }}
+        DIGEST: ${{ inputs.digest }}
+        RECORDS: ${{ inputs.records-dir }}
+        OVERLAY: ${{ inputs.kustomize-overlay }}
+        OUT: ${{ inputs.out }}
+        IMGSEC_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        python3 -m imgsec buildmap "$ACTION" --map "$MAP" --root "$ROOT" --revision "$REVISION" \
+          --include-optional "$INCLUDE_OPTIONAL" --service "$SERVICE" --registry "$REGISTRY" --namespace "$NAMESPACE" \
+          --tag "$TAG" --digest "$DIGEST" --records-dir "$RECORDS" --kustomize-overlay "$OVERLAY" --out "$OUT"
