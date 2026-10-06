@@ -21,6 +21,7 @@
 #                           pip pins only if pip can still resolve the file).
 #   dependabot-lang         npm, maven/gradle, nuget, … and anything not deterministic → Dependabot.
 #   dependabot-base-image   Go stdlib (= the golang builder image) and base images → Dependabot
+#   dockerfile-binary       a Go binary the Dockerfile downloads (e.g. grpc_health_probe) → bump its pin
 #                           `docker` ecosystem bumps the FROM lines.
 #   copa-os                 OS packages → Copa patches the BUILT image (pushed as <repo>:src-<d>-patched)
 #                           and re-scans it; Copa never changes the Dockerfile or the PR.
@@ -39,6 +40,10 @@ on:
         description: Patch OS packages of the scanned images with Copa and re-scan them
         type: boolean
         default: false
+      copa-severity:
+        description: "Run Copa on images with fixable OS findings at or above this (default: accept-trivy-job-patches). Copa only touches the image, never the PR, so it may be broader than the commit level."
+        type: string
+        default: ""
       build-pattern:
         description: Regex matching build check-run names (default = docker-multiarch-cicd's build jobs)
         type: string
@@ -127,6 +132,7 @@ jobs:
           IGNORE_PATTERN: ${{ inputs.ignore-pattern }}
           COMPOSE_FILE: ${{ inputs.docker-compose-file-name }}
           ACCEPT_LEVEL: ${{ inputs.accept-trivy-job-patches }}
+          COPA_SEVERITY: ${{ inputs.copa-severity }}
           POLL_INTERVAL: ${{ inputs.poll-interval-seconds }}
           TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
         run: python3 .pr-security-sync/actions/docker/pr-security-sync/sync.py collect

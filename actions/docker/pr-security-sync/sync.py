@@ -17,7 +17,8 @@ Subcommands (all read env, write files under OUT_DIR, write step outputs to $GIT
   decide   render the consolidated report (job summary + sticky comment), exit 1 on policy-fail.
 
 Fix paths: copa-os (OS package, patched in the image by Copa), commit-go / commit-pip (committed
-here), dependabot-base-image (Go stdlib = the golang builder image), dependabot-lang (npm, maven,
+here), dependabot-base-image (Go stdlib = the golang builder image), dockerfile-binary (a binary the
+Dockerfile downloads, e.g. grpc_health_probe — bump its version pin), dependabot-lang (npm, maven,
 nuget, … — Dependabot PRs), none (no fixed version). Stdlib only (+ the gh CLI on the runner).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, zipfile, io
@@ -120,12 +121,24 @@ def norm_pip(n):
     return re.sub(r"[-_.]+", "-", n).lower()
 
 
-def fix_path(res_class, res_type, pkg, fixed, ctx_dir):
+def downloaded_by_dockerfile(target, ctx_dir):
+    """True when the scanned binary is fetched by the Dockerfile (wget/curl/ADD URL), not built here."""
+    base = os.path.basename((target or "").rstrip("/"))
+    df = os.path.join(ctx_dir or "", "Dockerfile")
+    if not base or not ctx_dir or not os.path.exists(df):
+        return False
+    text = open(df).read()
+    return base in text and re.search(r"(?mi)\b(wget|curl)\b|^ADD\s+https?://", text) is not None
+
+
+def fix_path(res_class, res_type, pkg, fixed, ctx_dir, target=""):
     if not fixed:
         return "none"
     if res_class == "os-pkgs":
         return "copa-os"
     t = (res_type or "").lower()
+    if t == "gobinary" and downloaded_by_dockerfile(target, ctx_dir):
+        return "dockerfile-binary"   # bump the tool's version pin in the Dockerfile
     if t in ("gobinary", "gomod"):
         if pkg == "stdlib":
             return "dependabot-base-image"
@@ -146,6 +159,7 @@ def collect():
     scan_re = re.compile(env("SCAN_PATTERN") or r"🛡️ image security$")
     ignore_re = re.compile(env("IGNORE_PATTERN") or r"(?i)pr-delete|github-release|slsa|🏷️ release")
     accept = at_or_above(env("ACCEPT_LEVEL"))
+    copa_sev = at_or_above(env("COPA_SEVERITY") or env("ACCEPT_LEVEL"))
     os.makedirs(OUT, exist_ok=True)
     checks = wait_for_checks(sha, own, ignore_re)
     ctx = compose_contexts()
@@ -159,8 +173,11 @@ def collect():
             others.append({"name": c["name"], "conclusion": c.get("conclusion"), "url": c.get("html_url")})
             continue
         if rid not in names:
-            wf = gh_json(f"repos/{REPO}/actions/runs/{rid}")
-            names[rid] = re.sub(r"^[^A-Za-z0-9]+", "", wf.get("name") or rid).strip()
+            # NOT the run's `name`/`display_title` — with `run-name:` that is the title
+            # ("🐳 adservice image 2/merge @ …"); the workflow's own `name:` is the service.
+            wf_id = gh_json(f"repos/{REPO}/actions/runs/{rid}").get("workflow_id")
+            wf_name = gh_json(f"repos/{REPO}/actions/workflows/{wf_id}").get("name") if wf_id else rid
+            names[rid] = re.sub(r"^[^A-Za-z0-9]+", "", wf_name or str(rid)).strip()
         svc = services.setdefault(rid, {"service": names[rid], "run_id": rid,
                                         "run_url": f"https://github.com/{REPO}/actions/runs/{rid}"})
         svc[kind] = {"conclusion": c.get("conclusion"), "url": c.get("html_url")}
@@ -180,6 +197,15 @@ def collect():
         d = os.path.join(OUT, "scans", svc["service"]); os.makedirs(d, exist_ok=True); z.extractall(d)
         meta = json.load(open(os.path.join(d, "image-security-meta.json"))) if os.path.exists(os.path.join(d, "image-security-meta.json")) else {}
         trivy = json.load(open(os.path.join(d, "trivy.json")))
+        # `trivy sbom` leaves Result.Target empty for Go binaries — the SBOM (Syft sourceInfo:
+        # "… go module information: /usr/bin/grpc_health_probe") says which binary a module is in.
+        where = {}
+        sbom_f = os.path.join(d, "sbom.spdx.json")
+        if os.path.exists(sbom_f):
+            for p in json.load(open(sbom_f)).get("packages") or []:
+                m = re.search(r"information: (\S+)", p.get("sourceInfo") or "")
+                if m:
+                    where.setdefault((p.get("name"), (p.get("versionInfo") or "").lstrip("vgo")), set()).add(m.group(1))
         svc.update(image=meta.get("image", ""), digest=meta.get("digest", ""),
                    status=meta.get("status") or ("policy-fail" if svc["scan"]["conclusion"] == "failure" else "pass"),
                    threshold=(meta.get("threshold") or "CRITICAL").upper(),
@@ -193,7 +219,9 @@ def collect():
                               "installed": v.get("InstalledVersion", ""), "fixed": fixed,
                               "sev": (v.get("Severity") or "UNKNOWN").upper(),
                               "class": r.get("Class", ""), "type": r.get("Type", ""),
-                              "path": fix_path(r.get("Class"), r.get("Type"), v.get("PkgName", ""), fixed, svc["context"])})
+                              "target": r.get("Target") or ",".join(sorted(where.get((v.get("PkgName"), (v.get("InstalledVersion") or "").lstrip("vgo")), []))),
+                              "path": fix_path(r.get("Class"), r.get("Type"), v.get("PkgName", ""), fixed, svc["context"],
+                                               r.get("Target") or next(iter(where.get((v.get("PkgName"), (v.get("InstalledVersion") or "").lstrip("vgo")), [])), ""))})
         svc["counts"] = {s: sum(1 for v in vulns if v["sev"] == s) for s in ORDER}
         svc["fixable"] = {s: sum(1 for v in vulns if v["sev"] == s and v["fixed"]) for s in ORDER}
         svc["blocking"] = [v for v in vulns if v["sev"] in block_sev and (v["fixed"] or not svc["ignore_unfixed"])]
@@ -201,7 +229,7 @@ def collect():
         for v in accepted:
             if v["path"] in ("commit-go", "commit-pip"):
                 patch_cands.append({"service": svc["service"], "context": svc["context"], **v})
-        if any(v["path"] == "copa-os" for v in accepted) and svc.get("image"):
+        if any(v["path"] == "copa-os" and v["sev"] in copa_sev for v in vulns) and svc.get("image"):
             copa_cands.append({"service": svc["service"], "image": svc["image"], "digest": svc.get("digest", "")})
 
     # de-duplicate (same module may be reported by several CVEs) — keep the highest fixed version later

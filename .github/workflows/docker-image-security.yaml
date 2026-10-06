@@ -149,6 +149,27 @@ jobs:
       - name: Trivy on the SBOM
         run: trivy sbom --quiet --format json --output trivy.json --scanners vuln sbom.spdx.json
 
+      # `trivy sbom` scans OS packages only when the SBOM declares the operating system (an SPDX
+      # package with primaryPackagePurpose OPERATING-SYSTEM / a CycloneDX operating-system component).
+      # The build's Syft SPDX lists the deb/apk packages with distro purls but no such package, so
+      # without this step every OS vulnerability is silently skipped (seen on all ten Online Boutique
+      # images: 0 os-pkgs findings). Scan the image's OS packages by digest and merge the results.
+      - name: OS packages from the image (when the SBOM declares no OS)
+        id: os
+        env:
+          REF: ${{ steps.resolve.outputs.ref }}
+        run: |
+          set -euo pipefail
+          if jq -e '[.packages[]? | select(.primaryPackagePurpose == "OPERATING-SYSTEM")] | length > 0' sbom.spdx.json >/dev/null; then
+            echo "origin=SBOM (declares the OS)" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          trivy image --quiet --scanners vuln --pkg-types os --format json --output trivy-os.json "$REF"
+          jq -s '.[0] + {Results: ((.[0].Results // []) + (.[1].Results // []))}' trivy.json trivy-os.json > trivy.merged.json
+          mv trivy.merged.json trivy.json
+          n="$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Vulnerabilities[]?] | length' trivy.json)"
+          echo "::notice::the build SBOM declares no operating system — OS packages scanned from the image by digest ($n finding(s))"
+          echo "origin=image by digest (the SBOM declares no OS)" >> "$GITHUB_OUTPUT"
+
       - name: Report
         id: report
         env:
@@ -157,7 +178,7 @@ jobs:
           IMAGE: ${{ inputs.image }}
           DIGEST: ${{ steps.resolve.outputs.digest }}
           REVISION: ${{ github.sha }}
-          SBOM_ORIGIN: ${{ steps.sbom.outputs.origin }}
+          SBOM_ORIGIN: "${{ steps.sbom.outputs.origin }} · OS packages from ${{ steps.os.outputs.origin }}"
           OUT_MD: image-security-report.md
           OUT_META: image-security-meta.json  # machine-readable verdict (pr-security-synchronizer.yaml)
         run: |
@@ -172,6 +193,7 @@ jobs:
           path: |
             sbom.spdx.json
             trivy.json
+            trivy-os.json
             image-security-report.md
             image-security-meta.json
           retention-days: 30
