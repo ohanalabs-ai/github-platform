@@ -8,9 +8,10 @@
 # env: IMAGE (repo@sha256:… or repo:tag), SERVICE, BUILDKIT_ADDR, OUT_DIR
 set -uo pipefail
 out="${OUT_DIR:-pr-security-sync}/copa/${SERVICE}"; mkdir -p "$out"
-result() { # status [patched] [after-json]
+result() { # status [patched] [after-json]   (counts are OS packages only — what Copa changes)
   jq -n --arg service "$SERVICE" --arg image "$IMAGE" --arg status "$1" --arg patched "${2:-}" \
-        --argjson after "${3:-null}" '{service:$service, image:$image, status:$status, patched:$patched, after:$after}' \
+        --argjson before "${BEFORE:-null}" --argjson after "${3:-null}" \
+        '{service:$service, image:$image, status:$status, patched:$patched, os_before:$before, os_after:$after}' \
         > "$out/copa-result.json"
   echo "copa $SERVICE: $1 ${2:-}"
   exit 0
@@ -26,6 +27,9 @@ docker buildx imagetools create -t "$src" "$repo@$digest" >/dev/null 2>"$out/tag
   || result "error: cannot tag $repo@$digest ($(tail -1 "$out/tag.log"))"
 trivy image --quiet --pkg-types os --ignore-unfixed --format json --output "$out/os.json" "$src" \
   || result "error: trivy OS scan failed"
+os_counts() { jq -c '[.Results[]? | select(.Class == "os-pkgs") | .Vulnerabilities[]? | .Severity] |
+  {CRITICAL: map(select(.=="CRITICAL"))|length, HIGH: map(select(.=="HIGH"))|length, total: length}' "$1"; }
+BEFORE="$(os_counts "$out/os.json")"
 n="$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$out/os.json")"
 [ "$n" -gt 0 ] || result "nothing to patch (no fixable OS vulnerability)"
 if ! copa patch --image "$src" --report "$out/os.json" --tag "$patched_tag" \
@@ -34,8 +38,8 @@ if ! copa patch --image "$src" --report "$out/os.json" --tag "$patched_tag" \
 fi
 docker push --quiet "$repo:$patched_tag" >/dev/null 2>"$out/push.log" \
   || result "error: push failed ($(tail -1 "$out/push.log"))" "$repo:$patched_tag"
-trivy image --quiet --scanners vuln --format json --output "$out/after.json" "$repo:$patched_tag" \
+# Re-scan the patched image's OS packages with the SAME flags as the input report (fixable only),
+# so before/after compare like for like.
+trivy image --quiet --scanners vuln --pkg-types os --ignore-unfixed --format json --output "$out/after.json" "$repo:$patched_tag" \
   || result "patched; re-scan failed" "$repo:$patched_tag"
-after="$(jq -c '[.Results[]?.Vulnerabilities[]?.Severity] | {CRITICAL: map(select(.=="CRITICAL"))|length,
-          HIGH: map(select(.=="HIGH"))|length, MEDIUM: map(select(.=="MEDIUM"))|length, LOW: map(select(.=="LOW"))|length}' "$out/after.json")"
-result "patched" "$repo:$patched_tag" "$after"
+result "patched" "$repo:$patched_tag" "$(os_counts "$out/after.json")"

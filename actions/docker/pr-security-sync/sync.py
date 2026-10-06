@@ -355,7 +355,7 @@ def decide():
         sc = s.get("scan") or {}
         trivy = f"[artifact]({s['trivy_json_url']})" if s.get("trivy_json_url") else (sc.get("error") or "—")
         w(f"| [{s['service']}]({s['run_url']}) | {ICON.get(b.get('conclusion'), b.get('conclusion') or '—')} "
-          f"| {ICON.get(s.get('status'), '—')} | {s.get('threshold', '—')} "
+          f"| {ICON.get(s.get('status'), '—')} | {s.get('threshold', '—')} | "
           + " | ".join(str(c.get(k, '—')) for k in ORDER[:4])
           + f" | {len(s.get('blocking') or [])} | {trivy} |")
     blocking = [(s["service"], v) for s in data["services"] for v in (s.get("blocking") or [])]
@@ -393,6 +393,13 @@ def decide():
             w(f"* **Left to Dependabot** ({len(patches['deferred'])}):")
             for c in patches["deferred"]:
                 w(f"  * `{c['service']}` {c['pkg']} → {c['to']}: {c['reason']}")
+        tools = sorted({(svc, v.get("target", "").split(",")[0], v["pkg"]) for svc, v in blocking if v["path"] == "dockerfile-binary"})
+        if tools:
+            by_bin = {}
+            for svc, binary, pkg in tools:
+                by_bin.setdefault(os.path.basename(binary) or "?", set()).add(svc)
+            w("* **Dockerfile-downloaded tools** — bump their version pin in the Dockerfile: "
+              + "; ".join(f"`{b}` in {len(svcs)} image(s)" for b, svcs in sorted(by_bin.items())))
         dep = sorted({(svc, v["pkg"], v["path"]) for svc, v in blocking if v["path"].startswith("dependabot")})
         if dep:
             w(f"* **Dependabot scope** ({len(dep)} package(s)): "
@@ -400,11 +407,14 @@ def decide():
     if copa:
         w("* **Copa-patched images** (OS packages, image only — not a commit):")
         w("")
-        w("  | Service | Patched image | Copa | CRITICAL after | HIGH after |")
-        w("  |---|---|---|---|---|")
+        w("  Counts are fixable OS-package findings only (what Copa changes), before → after.")
+        w("")
+        w("  | Service | Patched image | Copa | CRITICAL | HIGH | All fixable OS |")
+        w("  |---|---|---|---|---|---|")
         for r in copa:
-            a = r.get("after") or {}
-            w(f"  | {r['service']} | `{r.get('patched', '—')}` | {r.get('status')} | {a.get('CRITICAL', '—')} | {a.get('HIGH', '—')} |")
+            b, a = r.get("os_before") or {}, r.get("os_after") or {}
+            arrow = lambda k: f"{b.get(k, '—')} → {a.get(k, '—')}"
+            w(f"  | {r['service']} | `{r.get('patched') or '—'}` | {r.get('status')} | {arrow('CRITICAL')} | {arrow('HIGH')} | {arrow('total')} |")
     if data["others"]:
         bad = [o for o in data["others"] if o["conclusion"] not in ("success", "skipped", "neutral")]
         w("")
