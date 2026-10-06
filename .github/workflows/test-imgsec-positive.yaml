@@ -1,0 +1,178 @@
+# Expected: every job GREEN.
+# Test caller for https://github.com/ohanalabs-ai/github-platform/pull/35 — calls the reusable by LOCAL path,
+# so every job exercises exactly the commit under review. Each job uses a distinct artifact-prefix.
+name: 🧪 imgsec positive suite
+on:
+  pull_request:
+    branches: [copilot/implement-manifest-driven-security]
+    paths: [".github/workflows/test-imgsec-*.yaml", ".github/workflows/docker-images-devsecops-scan.yaml", "actions/images/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  p01-single-ref:
+    name: 🧪 P01 images=single ref (docker.io/library/alpine:3.20), threshold CRITICAL
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "alpine:3.20"
+      severity-threshold: "CRITICAL"
+      platforms: "linux/amd64"
+      artifact-prefix: "p01"
+
+  p02-json-array:
+    name: 🧪 P02 images=JSON array, threshold CRITICAL
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: '["busybox:1.37","redis:7-alpine"]'
+      severity-threshold: "CRITICAL"
+      platforms: "linux/amd64"
+      artifact-prefix: "p02"
+
+  p03-manifest:
+    name: 🧪 P03 images=versioned manifest (per-image overrides)
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: '{"version":1,"mode":"scan","defaults":{"severity-threshold":"CRITICAL"},"images":[{"ref":"alpine:3.20","platforms":"linux/arm64"},{"ref":"redis:7-alpine","severity-threshold":"NONE","labels":{"svc":"cache"}}]}'
+      artifact-prefix: "p03"
+
+  p04-sources-manifests:
+    name: 🧪 P04 sources=raw manifests (fork release/kubernetes-manifests.yaml), report-only
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      sources: '{"version":1,"sources":[{"id":"fork-release","type":"manifests","paths":["release/kubernetes-manifests.yaml"]}]}'
+      source-repository: "planeodev/gcp-microservices-demo"
+      source-ref: "57fdd78156a1fec98f99a54107eff7fc603286d1"
+      platforms: "linux/amd64"
+      options: '{"version":1,"report-only":true,"max-parallel":6}'
+      artifact-prefix: "p04"
+
+  p05-sources-kustomize:
+    name: 🧪 P05 sources=kustomize (Google OB kustomize/), threshold NONE
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      sources: '{"version":1,"sources":[{"id":"google-ob","type":"kustomize","path":"kustomize"}]}'
+      source-repository: "GoogleCloudPlatform/microservices-demo"
+      source-ref: "38e7348eb289eb5b87c0c6e8cb19ced0449dc389"
+      severity-threshold: "NONE"
+      platforms: "linux/amd64"
+      options: '{"version":1,"max-parallel":8}'
+      artifact-prefix: "p05"
+
+  p06-sources-helm:
+    name: 🧪 P06 sources=helm (Google OB helm-chart/), threshold NONE
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      sources: '{"version":1,"sources":[{"id":"google-ob-helm","type":"helm","chart":"helm-chart","release-name":"ob","namespace":"online-boutique"}]}'
+      source-repository: "GoogleCloudPlatform/microservices-demo"
+      source-ref: "38e7348eb289eb5b87c0c6e8cb19ced0449dc389"
+      severity-threshold: "NONE"
+      platforms: "linux/amd64"
+      artifact-prefix: "p06"
+
+  p07-ignore-unfixed:
+    name: 🧪 P07 ignore-unfixed=true, threshold HIGH
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "alpine:3.20"
+      severity-threshold: "HIGH"
+      ignore-unfixed: true
+      platforms: "linux/amd64"
+      artifact-prefix: "p07"
+
+  p08-github-token-ghcr:
+    name: 🧪 P08 registry-auth github-token for ghcr.io (allowed on PR via option)
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "ghcr.io/kagent-dev/kagent/controller:0.10.2"
+      severity-threshold: "NONE"
+      platforms: "linux/amd64"
+      registry-auth-profiles: '{"version":1,"registries":{"ghcr.io":{"type":"github-token"}}}'
+      options: '{"version":1,"allow-credentials-on-pull-request":true}'
+      artifact-prefix: "p08"
+
+  p09-sbom-generate:
+    name: 🧪 P09 sbom-policy=generate
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "busybox:1.37"
+      sbom-policy: "generate"
+      severity-threshold: "CRITICAL"
+      platforms: "linux/amd64"
+      artifact-prefix: "p09"
+
+  p10-platforms-all:
+    name: 🧪 P10 platforms=all on a multi-arch image
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "alpine:3.20"
+      platforms: "all"
+      severity-threshold: "CRITICAL"
+      artifact-prefix: "p10"
+
+  p11-sarif:
+    name: 🧪 P11 options.upload-sarif=true
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    with:
+      images: "alpine:3.20"
+      platforms: "linux/amd64"
+      severity-threshold: "CRITICAL"
+      options: '{"version":1,"upload-sarif":true}'
+      artifact-prefix: "p11"
+
+  p12-allow-empty:
+    name: 🧪 P12 empty images + allow-empty=true → pass
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: ""
+      options: '{"version":1,"allow-empty":true}'
+      artifact-prefix: "p12"
+
+  p13-report-only-on-fail:
+    name: 🧪 P13 policy-fail under report-only → job green, status policy-fail
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "node:14"
+      severity-threshold: "CRITICAL"
+      platforms: "linux/amd64"
+      options: '{"version":1,"report-only":true}'
+      artifact-prefix: "p13"
