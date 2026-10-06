@@ -38,7 +38,7 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `github-job-timeout-minutes` | `10` | Per-job timeout; increase for slow multi-arch builds |
 | `registry` | `ghcr.io` | Default registry for all builds |
 | `platforms` | `linux/amd64,linux/arm64` | Platforms passed to `docker buildx bake` |
-| `docker-compose-context` | `.` | Directory the compose file's build context resolves from |
+| `docker-compose-context` | `.` | **Overrides the bake target's build context** (`<target>.context=<this>`), replacing the service's `build.context` from the compose file. In a monorepo set it to exactly that service's `build.context` (e.g. `./src/frontend`) — the default `.` makes the build look for `./Dockerfile` at the repo root |
 | `docker-compose-file-name` | `docker-compose.yaml` | Compose file used by `docker buildx bake` |
 | `docker-compose-target-service` | *(none)* | Bake target service name — only needed if the compose file defines more than one service |
 | `image-name-suffix` | `""` | Path suffix for monorepos publishing multiple images from one repo (e.g. `api` → `ghcr.io/<owner>/<repo>/api`). Empty preserves the legacy one-image-per-repo name. On Docker Hub the suffix is joined with a dash instead, since Docker Hub only allows one path segment |
@@ -52,6 +52,36 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `slsa-signer-workflow` | *(none)* | Reusable workflow identity used to verify artifact attestations with `gh attestation verify` |
 
 Use `secrets: inherit` in the caller (as in the example above) rather than declaring individual secrets — this workflow reads whatever registry/signing secrets it needs from the caller's own repo/environment secrets at the names it expects.
+
+## Outputs
+
+| Output | Set by | Description |
+|---|---|---|
+| `image_ref` | PR, ref or release build | Digest-pinned reference of the image this run built: `<base>/pr/<N>@sha256:…` on a PR, `<base>@sha256:…` on a branch or tag. Empty when nothing was built (closed PR) |
+| `image_digest` | PR, ref or release build | The `sha256:…` digest of that image |
+| `image_tag`, `image_base`, `short_sha`, `effective_ref` | ref build only | Unchanged legacy outputs of the branch build |
+
+## Compose an image scan after the build
+
+Keep the scan a separate job in the caller that `needs` the build, so an image is scanned only
+after its build succeeded, and a policy failure fails the run (shift-left):
+
+```yaml
+jobs:
+  docker:
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+    # … with: as above
+  scan:
+    name: 🛡️ scan
+    needs: docker
+    if: needs.docker.outputs.image_ref != ''
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-images-devsecops-scan.yaml@main
+    permissions: { contents: read, packages: read }
+    with:
+      images: ${{ needs.docker.outputs.image_ref }}
+      severity-threshold: CRITICAL   # accept everything below CRITICAL
+      artifact-prefix: imgsec
+```
 
 ## Jobs
 
