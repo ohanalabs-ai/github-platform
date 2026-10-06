@@ -1,0 +1,192 @@
+# 🛡️ docker-image-security — the image-only security gate of the Vionix secure supply chain (Build phase).
+#
+# Scans ONE docker image right after it is built. Input: the image (repo:tag or repo@digest — the
+# build reusable's `image_ref` output). Nothing else is scanned here: Dockerfiles and compose files are
+# verified statically at build time; deployment manifests are a Deploy-phase concern.
+#
+#   1. resolve the image to its immutable digest
+#   2. SBOM — `sbom-source: build` (default) uses the SPDX SBOM the build attested to the image
+#      (GitHub artifact attestation, else cosign); if none is found it falls back to generating one
+#      with Syft and says so. `generate` always runs Syft.
+#   3. `trivy sbom` on that SBOM
+#   4. report — the Vionix `actions/docker/sbom-reporter` format (Viasat/vionix,
+#      ohanalabs-ai/oahana-github docker-compose-devsecops-check-workflow.yaml `sbom` job): SBOM
+#      table + a vulnerability section, in the job summary and one sticky PR comment per image
+#   5. the POLICY GATE — this job fails when findings at or above `severity-threshold` exist.
+#      Callers stay thin (needs + uses + with); they never parse the status.
+#
+# Trivy/Syft are installed from checksum-pinned release tarballs (actions/docker/image-security/
+# install.sh), never via aquasecurity/trivy-action (compromised tags, GHSA-69fq-xp46-6x23).
+name: 🛡️ docker-image-security
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: >-
+          Image to scan: repo:tag or repo@sha256:… (pass the build's `image_ref`). Empty = nothing was
+          built in this run (e.g. a closed PR): the scan is skipped and reports `skipped`.
+        type: string
+        required: true
+      severity-threshold:
+        description: "Fail on findings at or above: CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN | NONE (report only)"
+        type: string
+        default: CRITICAL
+      ignore-unfixed:
+        description: Only findings that have a fixed version count against the threshold (all stay in the report)
+        type: boolean
+        default: false
+      sbom-source:
+        description: "build (the SBOM attested by the build, else generate) | generate (always Syft)"
+        type: string
+        default: build
+      add-pr-comment:
+        description: Post/refresh one sticky PR comment per image on pull_request runs
+        type: boolean
+        default: true
+      github-actions-runner:
+        type: string
+        default: ubuntu-latest
+      github-job-timeout-minutes:
+        type: number
+        default: 15
+    outputs:
+      status:
+        description: "pass | policy-fail | skipped"
+        value: ${{ jobs.scan.outputs.status || 'skipped' }}
+      critical-count:
+        value: ${{ jobs.scan.outputs.critical-count }}
+      high-count:
+        value: ${{ jobs.scan.outputs.high-count }}
+      blocking-count:
+        value: ${{ jobs.scan.outputs.blocking-count }}
+      image-digest:
+        value: ${{ jobs.scan.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: read
+  attestations: read
+  pull-requests: write
+
+jobs:
+  scan:
+    name: 🛡️ image security
+    if: inputs.image != ''
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
+    outputs:
+      status: ${{ steps.report.outputs.status }}
+      critical-count: ${{ steps.report.outputs.critical-count }}
+      high-count: ${{ steps.report.outputs.high-count }}
+      blocking-count: ${{ steps.report.outputs.blocking-count }}
+      digest: ${{ steps.resolve.outputs.digest }}
+    env:
+      IMAGE_IN: ${{ inputs.image }}
+      THRESHOLD: ${{ inputs.severity-threshold }}
+      IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+      SBOM_SOURCE: ${{ inputs.sbom-source }}
+    steps:
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .image-security
+          sparse-checkout: actions/docker/image-security
+          persist-credentials: false
+
+      - name: Install Trivy + Syft (checksum-pinned)
+        run: bash .image-security/actions/docker/image-security/install.sh
+
+      - name: Registry login (ghcr.io only, read)
+        if: startsWith(inputs.image, 'ghcr.io/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin >/dev/null
+
+      - name: Resolve the image digest
+        id: resolve
+        run: |
+          set -euo pipefail
+          case "$SBOM_SOURCE" in build|generate) ;; *) echo "::error::sbom-source must be build or generate"; exit 1 ;; esac
+          repo="${IMAGE_IN%@*}"; repo="${repo%:*}"
+          [[ "$IMAGE_IN" == *@sha256:* ]] && repo="${IMAGE_IN%@*}"
+          digest="$(docker buildx imagetools inspect "$IMAGE_IN" --format '{{json .Manifest}}' | jq -r .digest)"
+          [[ "$digest" == sha256:* ]] || { echo "::error::could not resolve a digest for $IMAGE_IN"; exit 1; }
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"; echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=$repo@$digest" >> "$GITHUB_OUTPUT"
+          echo "Scanning $repo@$digest"
+
+      - name: SBOM (from the build's attestation, else generated)
+        id: sbom
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.resolve.outputs.ref }}
+        run: |
+          set -euo pipefail
+          origin=""
+          if [ "$SBOM_SOURCE" = build ]; then
+            if gh attestation verify "oci://$REF" --owner "${GITHUB_REPOSITORY_OWNER}" \
+                 --predicate-type https://spdx.dev/Document/v2.3 --format json > att.json 2>/dev/null \
+               && jq -e '.[0].verificationResult.statement.predicate' att.json > sbom.spdx.json 2>/dev/null; then
+              origin="build attestation (GitHub, verified)"
+            elif command -v cosign >/dev/null && cosign download attestation --predicate-type spdxjson "$REF" 2>/dev/null \
+                 | head -1 | jq -er '.payload | @base64d | fromjson | .predicate' > sbom.spdx.json 2>/dev/null; then
+              origin="build attestation (cosign)"
+            else
+              echo "::notice::no SBOM attestation found on $REF — generating one with Syft"
+            fi
+          fi
+          if [ -z "$origin" ]; then
+            syft "registry:$REF" -o spdx-json=sbom.spdx.json -q
+            origin="generated by Syft in this job"
+          fi
+          echo "origin=$origin" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy on the SBOM
+        run: trivy sbom --quiet --format json --output trivy.json --scanners vuln sbom.spdx.json
+
+      - name: Report
+        id: report
+        env:
+          SBOM: sbom.spdx.json
+          TRIVY_JSON: trivy.json
+          IMAGE: ${{ inputs.image }}
+          DIGEST: ${{ steps.resolve.outputs.digest }}
+          REVISION: ${{ github.sha }}
+          SBOM_ORIGIN: ${{ steps.sbom.outputs.origin }}
+          OUT_MD: image-security-report.md
+        run: |
+          python3 .image-security/actions/docker/image-security/report.py
+          cat image-security-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SBOM, Trivy results and report
+        if: always() && steps.report.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-security-report  # one image per caller run (one caller file per service)
+          path: |
+            sbom.spdx.json
+            trivy.json
+            image-security-report.md
+          retention-days: 30
+
+      - name: Sticky PR comment
+        if: always() && inputs.add-pr-comment && github.event_name == 'pull_request' && steps.report.outcome == 'success'
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: image-security-${{ steps.resolve.outputs.repo }}
+          recreate: true
+          path: image-security-report.md
+
+      - name: Policy gate
+        env:
+          STATUS: ${{ steps.report.outputs.status }}
+          BLOCKING: ${{ steps.report.outputs.blocking-count }}
+        run: |
+          if [ "$STATUS" = policy-fail ]; then
+            echo "::error title=Image security policy::$BLOCKING finding(s) at or above $THRESHOLD in $IMAGE_IN — see the job summary"
+            exit 1
+          fi
+          echo "✅ image security: $STATUS"
