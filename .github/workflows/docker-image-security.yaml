@@ -1,0 +1,183 @@
+# 🛡️ docker-image-security — the image-only security gate of the Vionix secure supply chain (Build phase).
+#
+# Scans ONE docker image right after it is built. Input: the image (repo:tag or repo@digest — the
+# build reusable's `image_ref` output). Nothing else is scanned here: Dockerfiles and compose files are
+# verified statically at build time; deployment manifests are a Deploy-phase concern.
+#
+#   1. resolve the image to its immutable digest
+#   2. SBOM — `sbom-source: build` (default) uses the SPDX SBOM the build attested to the image
+#      (GitHub artifact attestation, else cosign); if none is found it falls back to generating one
+#      with Syft and says so. `generate` always runs Syft.
+#   3. `trivy sbom` on that SBOM
+#   4. report — the Vionix `actions/docker/sbom-reporter` format (Viasat/vionix,
+#      ohanalabs-ai/oahana-github docker-compose-devsecops-check-workflow.yaml `sbom` job): SBOM
+#      table + a vulnerability section, in the job summary and one sticky PR comment per image
+#   5. the POLICY GATE — this job fails when findings at or above `severity-threshold` exist.
+#      Callers stay thin (needs + uses + with); they never parse the status.
+#
+# Every logic step is TypeScript run by actions/github-script (no npm dependencies, no Python/bash):
+# actions/docker/image-security/{install,resolve,sbom,scan,report,comment,gate}.ts, loaded with
+# `await import(<path>.ts)` — github-script v8 runs on Node 24, which strips erasable TS types natively.
+# Trivy/Syft are installed from checksum-pinned release tarballs (install.ts), never via
+# aquasecurity/trivy-action (compromised tags, GHSA-69fq-xp46-6x23).
+name: 🛡️ docker-image-security
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: >-
+          Image to scan: repo:tag or repo@sha256:… (pass the build's `image_ref`). Empty = nothing was
+          built in this run (e.g. a closed PR): the scan is skipped and reports `skipped`.
+        type: string
+        required: true
+      severity-threshold:
+        description: "Fail on findings at or above: CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN | NONE (report only)"
+        type: string
+        default: CRITICAL
+      ignore-unfixed:
+        description: Only findings that have a fixed version count against the threshold (all stay in the report)
+        type: boolean
+        default: false
+      sbom-source:
+        description: "build (the SBOM attested by the build, else generate) | generate (always Syft)"
+        type: string
+        default: build
+      add-pr-comment:
+        description: Post/refresh one sticky PR comment per image on pull_request runs
+        type: boolean
+        default: true
+      github-actions-runner:
+        type: string
+        default: ubuntu-latest
+      github-job-timeout-minutes:
+        type: number
+        default: 15
+    outputs:
+      status:
+        description: "pass | policy-fail | skipped"
+        value: ${{ jobs.scan.outputs.status || 'skipped' }}
+      critical-count:
+        value: ${{ jobs.scan.outputs.critical-count }}
+      high-count:
+        value: ${{ jobs.scan.outputs.high-count }}
+      blocking-count:
+        value: ${{ jobs.scan.outputs.blocking-count }}
+      image-digest:
+        value: ${{ jobs.scan.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: read
+  attestations: read
+  pull-requests: write
+
+jobs:
+  scan:
+    name: 🛡️ image security
+    if: inputs.image != ''
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
+    outputs:
+      status: ${{ steps.report.outputs.status }}
+      critical-count: ${{ steps.report.outputs.critical-count }}
+      high-count: ${{ steps.report.outputs.high-count }}
+      blocking-count: ${{ steps.report.outputs.blocking-count }}
+      digest: ${{ steps.resolve.outputs.digest }}
+    env:
+      IMAGE_IN: ${{ inputs.image }}
+      THRESHOLD: ${{ inputs.severity-threshold }}
+      IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+      SBOM_SOURCE: ${{ inputs.sbom-source }}
+    steps:
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .image-security
+          sparse-checkout: actions/docker/image-security
+          persist-credentials: false
+
+      - name: Install Trivy + Syft (checksum-pinned)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.image-security/actions/docker/image-security/install.ts`);
+            await run({ core, exec, github, context });
+
+      - name: Resolve the image digest (ghcr.io login, read)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.image-security/actions/docker/image-security/resolve.ts`);
+            await run({ core, exec, github, context });
+
+      - name: SBOM (from the build's attestation, else generated)
+        id: sbom
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.resolve.outputs.ref }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.image-security/actions/docker/image-security/sbom.ts`);
+            await run({ core, exec, github, context });
+
+      - name: Trivy on the SBOM
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.image-security/actions/docker/image-security/scan.ts`);
+            await run({ core, exec, github, context });
+
+      - name: Report
+        id: report
+        env:
+          SBOM: sbom.spdx.json
+          TRIVY_JSON: trivy.json
+          IMAGE: ${{ inputs.image }}
+          DIGEST: ${{ steps.resolve.outputs.digest }}
+          REVISION: ${{ github.sha }}
+          SBOM_ORIGIN: ${{ steps.sbom.outputs.origin }}
+          OUT_MD: image-security-report.md
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.image-security/actions/docker/image-security/report.ts`);
+            await run({ core, exec, github, context });
+
+      - name: Upload SBOM, Trivy results and report
+        if: always() && steps.report.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-security-report  # one image per caller run (one caller file per service)
+          path: |
+            sbom.spdx.json
+            trivy.json
+            image-security-report.md
+          retention-days: 30
+
+      - name: Sticky PR comment
+        if: always() && inputs.add-pr-comment && github.event_name == 'pull_request' && steps.report.outcome == 'success'
+        env:
+          REPO: ${{ steps.resolve.outputs.repo }}
+          OUT_MD: image-security-report.md
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.image-security/actions/docker/image-security/comment.ts`);
+            await run({ core, exec, github, context });
+
+      - name: Policy gate
+        env:
+          STATUS: ${{ steps.report.outputs.status }}
+          BLOCKING: ${{ steps.report.outputs.blocking-count }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.image-security/actions/docker/image-security/gate.ts`);
+            await run({ core, exec, github, context });

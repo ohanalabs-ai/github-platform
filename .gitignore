@@ -1,0 +1,4 @@
+
+# Python caches never belong in this repo (actions are TypeScript run by actions/github-script)
+__pycache__/
+*.pyc
