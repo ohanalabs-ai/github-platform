@@ -7,7 +7,8 @@ ohanalabs-ai/oahana-github, used by docker-compose-devsecops-check-workflow.yaml
 `|Dependency|Version|Type|` table; the same markdown goes to the job summary and to one sticky
 PR comment per image. A vulnerability section and the policy verdict are added below it.
 
-Inputs (env): SBOM, TRIVY_JSON, IMAGE, DIGEST, REVISION, THRESHOLD, IGNORE_UNFIXED, SBOM_ORIGIN, OUT_MD.
+Inputs (env): SBOM, TRIVY_JSON, IMAGE, DIGEST, REVISION, THRESHOLD, IGNORE_UNFIXED, SBOM_ORIGIN, OUT_MD,
+OUT_META (optional: also write the verdict as JSON — consumed by pr-security-synchronizer.yaml).
 Outputs: written to $GITHUB_OUTPUT — status (pass|policy-fail), counts per severity, blocking.
 Stdlib only.
 """
@@ -94,6 +95,12 @@ def main():
     md = "\n".join(out) + "\n"
     open(env("OUT_MD"), "w").write(md)
 
+    if env("OUT_META"):
+        with open(env("OUT_META"), "w") as f:
+            json.dump({"version": 1, "image": env("IMAGE") or "", "digest": env("DIGEST") or "",
+                       "revision": env("REVISION") or "", "threshold": threshold, "ignore_unfixed": ignore_unfixed,
+                       "sbom_origin": env("SBOM_ORIGIN") or "", "status": status,
+                       "counts": counts, "blocking": len(blocking)}, f)
     with open(env("GITHUB_OUTPUT"), "a") as f:
         f.write(f"status={status}\n")
         for s in ORDER:

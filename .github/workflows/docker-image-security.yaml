@@ -114,8 +114,7 @@ jobs:
           [[ "$IMAGE_IN" == *@sha256:* ]] && repo="${IMAGE_IN%@*}"
           digest="$(docker buildx imagetools inspect "$IMAGE_IN" --format '{{json .Manifest}}' | jq -r .digest)"
           [[ "$digest" == sha256:* ]] || { echo "::error::could not resolve a digest for $IMAGE_IN"; exit 1; }
-          echo "repo=$repo" >> "$GITHUB_OUTPUT"; echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "ref=$repo@$digest" >> "$GITHUB_OUTPUT"
+          { echo "repo=$repo"; echo "digest=$digest"; echo "ref=$repo@$digest"; } >> "$GITHUB_OUTPUT"
           echo "Scanning $repo@$digest"
 
       - name: SBOM (from the build's attestation, else generated)
@@ -160,6 +159,7 @@ jobs:
           REVISION: ${{ github.sha }}
           SBOM_ORIGIN: ${{ steps.sbom.outputs.origin }}
           OUT_MD: image-security-report.md
+          OUT_META: image-security-meta.json  # machine-readable verdict (pr-security-synchronizer.yaml)
         run: |
           python3 .image-security/actions/docker/image-security/report.py
           cat image-security-report.md >> "$GITHUB_STEP_SUMMARY"
@@ -173,6 +173,7 @@ jobs:
             sbom.spdx.json
             trivy.json
             image-security-report.md
+            image-security-meta.json
           retention-days: 30
 
       - name: Sticky PR comment
