@@ -9,17 +9,20 @@ workflow run's own jobs) completed, groups them by workflow run (= one service),
 and decides.
 
 Subcommands (all read env, write files under OUT_DIR, write step outputs to $GITHUB_OUTPUT):
-  collect  wait + classify + consolidated.json (+ patch/copa candidate lists)
+  collect  wait + classify + consolidated.json (+ the committable patch candidates)
   patch    apply DETERMINISTIC language fixes at/above ACCEPT_LEVEL in the checked-out PR tree:
            Go modules (`go get mod@fixed`, kept only if the module's `go` directive stays within the
            Dockerfile's golang builder) and pip-compile pins (`pkg==fixed`, kept only if pip can
-           still resolve the file). Everything else is left to Dependabot / Copa.
+           still resolve the file). Everything else is left to Dependabot or a Dockerfile edit.
   decide   render the consolidated report (job summary + sticky comment), exit 1 on policy-fail.
 
-Fix paths: copa-os (OS package, patched in the image by Copa), commit-go / commit-pip (committed
-here), dependabot-base-image (Go stdlib = the golang builder image), dockerfile-binary (a binary the
-Dockerfile downloads, e.g. grpc_health_probe — bump its version pin), dependabot-lang (npm, maven,
-nuget, … — Dependabot PRs), none (no fixed version). Stdlib only (+ the gh CLI on the runner).
+Fix paths — every one a DECLARATIVE source change that rebuilds the image (post-build image
+patching such as Copa is rejected: it mutates a built image away from what the repo declares):
+commit-go / commit-pip (committed here), base-image (OS packages and Go stdlib — a newer base
+image fixes them; Dependabot `docker` bumps the FROM), dockerfile (an OS package the Dockerfile
+installs itself via apk/apt — pin or upgrade it there), dockerfile-binary (a binary the Dockerfile
+downloads, e.g. grpc_health_probe — bump its version pin), dependabot-lang (npm, maven, nuget, … —
+Dependabot PRs), none (no fixed version). Stdlib only (+ the gh CLI on the runner).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, zipfile, io
 
@@ -131,17 +134,30 @@ def downloaded_by_dockerfile(target, ctx_dir):
     return base in text and re.search(r"(?mi)\b(wget|curl)\b|^ADD\s+https?://", text) is not None
 
 
+def installed_by_dockerfile(pkg, ctx_dir):
+    """True when the Dockerfile installs this OS package itself (apk add / apt-get install / yum)."""
+    df = os.path.join(ctx_dir or "", "Dockerfile")
+    if not pkg or not ctx_dir or not os.path.exists(df):
+        return False
+    text = open(df).read()
+    for m in re.finditer(r"(?is)\b(?:apk\s+add|apt-get\s+install|apt\s+install|yum\s+install|dnf\s+install|microdnf\s+install)\b(.*?)(?:&&|;|$)", text):
+        words = re.split(r"[\s\\]+", m.group(1))
+        if any(re.fullmatch(re.escape(pkg) + r"(?:[=<>~].*)?", w) for w in words):
+            return True
+    return False
+
+
 def fix_path(res_class, res_type, pkg, fixed, ctx_dir, target=""):
     if not fixed:
         return "none"
     if res_class == "os-pkgs":
-        return "copa-os"
+        return "dockerfile" if installed_by_dockerfile(pkg, ctx_dir) else "base-image"
     t = (res_type or "").lower()
     if t == "gobinary" and downloaded_by_dockerfile(target, ctx_dir):
         return "dockerfile-binary"   # bump the tool's version pin in the Dockerfile
     if t in ("gobinary", "gomod"):
         if pkg == "stdlib":
-            return "dependabot-base-image"
+            return "base-image"
         return "commit-go" if ctx_dir and glob.glob(os.path.join(ctx_dir, "go.mod")) else "dependabot-lang"
     if t in ("python-pkg", "pip", "pipenv", "poetry"):
         req = os.path.join(ctx_dir or "", "requirements.txt")
@@ -159,7 +175,6 @@ def collect():
     scan_re = re.compile(env("SCAN_PATTERN") or r"🛡️ image security$")
     ignore_re = re.compile(env("IGNORE_PATTERN") or r"(?i)pr-delete|github-release|slsa|🏷️ release")
     accept = at_or_above(env("ACCEPT_LEVEL"))
-    copa_sev = at_or_above(env("COPA_SEVERITY") or env("ACCEPT_LEVEL"))
     os.makedirs(OUT, exist_ok=True)
     checks = wait_for_checks(sha, own, ignore_re)
     ctx = compose_contexts()
@@ -182,7 +197,7 @@ def collect():
                                         "run_url": f"https://github.com/{REPO}/actions/runs/{rid}"})
         svc[kind] = {"conclusion": c.get("conclusion"), "url": c.get("html_url")}
 
-    patch_cands, copa_cands = [], []
+    patch_cands = []
     for rid, svc in services.items():
         svc["context"] = ctx.get(svc["service"], "")
         if "scan" not in svc:
@@ -229,17 +244,14 @@ def collect():
         for v in accepted:
             if v["path"] in ("commit-go", "commit-pip"):
                 patch_cands.append({"service": svc["service"], "context": svc["context"], **v})
-        if any(v["path"] == "copa-os" and v["sev"] in copa_sev for v in vulns) and svc.get("image"):
-            copa_cands.append({"service": svc["service"], "image": svc["image"], "digest": svc.get("digest", "")})
 
     # de-duplicate (same module may be reported by several CVEs) — keep the highest fixed version later
     result = {"version": 1, "repo": REPO, "head_sha": sha, "accept_level": (env("ACCEPT_LEVEL") or "none").lower(),
               "services": sorted(services.values(), key=lambda s: s["service"]), "others": others,
-              "patch_candidates": patch_cands, "copa_candidates": copa_cands}
+              "patch_candidates": patch_cands}
     json.dump(result, open(os.path.join(OUT, "consolidated.json"), "w"), indent=1)
-    out(has_patches=str(bool(patch_cands)).lower(), copa_matrix={"include": copa_cands},
-        has_copa=str(bool(copa_cands)).lower(), services=len(services))
-    print(f"{len(services)} service(s); {len(patch_cands)} committable fix(es); {len(copa_cands)} image(s) for Copa")
+    out(has_patches=str(bool(patch_cands)).lower(), services=len(services))
+    print(f"{len(services)} service(s); {len(patch_cands)} committable fix(es)")
     return 0
 
 
@@ -334,9 +346,6 @@ ICON = {"success": "✅", "failure": "❌", "cancelled": "🚫", "skipped": "⏭
 def decide():
     data = json.load(open(os.path.join(OUT, "consolidated.json")))
     patches = json.load(open(os.path.join(OUT, "patches.json"))) if os.path.exists(os.path.join(OUT, "patches.json")) else {"applied": [], "deferred": []}
-    copa = []
-    for f in sorted(glob.glob(os.path.join(OUT, "**", "copa-result.json"), recursive=True)):
-        copa.append(json.load(open(f)))
     commit = env("PATCH_COMMIT") or ""
     lines = []
     w = lines.append
@@ -400,21 +409,18 @@ def decide():
                 by_bin.setdefault(os.path.basename(binary) or "?", set()).add(svc)
             w("* **Dockerfile-downloaded tools** — bump their version pin in the Dockerfile: "
               + "; ".join(f"`{b}` in {len(svcs)} image(s)" for b, svcs in sorted(by_bin.items())))
+        base = sorted({svc for svc, v in blocking if v["path"] == "base-image"})
+        if base:
+            w(f"* **Base image** ({sum(1 for _, v in blocking if v['path'] == 'base-image')} finding(s) in {len(base)} image(s)): "
+              "a newer base fixes them — Dependabot `docker` bumps the FROM: " + ", ".join(f"`{s}`" for s in base))
+        own = sorted({(svc, v["pkg"]) for svc, v in blocking if v["path"] == "dockerfile"})
+        if own:
+            w(f"* **Dockerfile-installed OS packages** ({len(own)}) — pin or upgrade them on their `apk`/`apt` line: "
+              + ", ".join(f"`{s}:{p}`" for s, p in own[:30]) + (" …" if len(own) > 30 else ""))
         dep = sorted({(svc, v["pkg"], v["path"]) for svc, v in blocking if v["path"].startswith("dependabot")})
         if dep:
             w(f"* **Dependabot scope** ({len(dep)} package(s)): "
               + ", ".join(f"`{s}:{p}`" for s, p, _ in dep[:30]) + (" …" if len(dep) > 30 else ""))
-    if copa:
-        w("* **Copa-patched images** (OS packages, image only — not a commit):")
-        w("")
-        w("  Counts are fixable OS-package findings only (what Copa changes), before → after.")
-        w("")
-        w("  | Service | Patched image | Copa | CRITICAL | HIGH | All fixable OS |")
-        w("  |---|---|---|---|---|---|")
-        for r in copa:
-            b, a = r.get("os_before") or {}, r.get("os_after") or {}
-            arrow = lambda k: f"{b.get(k, '—')} → {a.get(k, '—')}"
-            w(f"  | {r['service']} | `{r.get('patched') or '—'}` | {r.get('status')} | {arrow('CRITICAL')} | {arrow('HIGH')} | {arrow('total')} |")
     if data["others"]:
         bad = [o for o in data["others"] if o["conclusion"] not in ("success", "skipped", "neutral")]
         w("")

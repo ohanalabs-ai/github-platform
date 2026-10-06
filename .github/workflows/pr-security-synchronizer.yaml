@@ -14,17 +14,19 @@
 # excludes this run's own jobs by RUN ID (not by name), and its job-level concurrency group cancels
 # an older poller when the PR gets a new push.
 #
-# FIXES — who does what:
+# FIXES — who does what. Every fix is a DECLARATIVE source change that rebuilds the image (owner
+# rule: GitOps configuration is declarative). Post-build image patching (e.g. Copa) is REJECTED —
+# it mutates a built image, so what runs no longer matches what the repo declares.
 #   commit-go / commit-pip  deterministic language bumps from Trivy's FixedVersion, at or above
 #                           `accept-trivy-job-patches`, as ONE commit on the PR branch (Go modules
 #                           only if the `go` directive stays within the Dockerfile's golang builder;
 #                           pip pins only if pip can still resolve the file).
 #   dependabot-lang         npm, maven/gradle, nuget, … and anything not deterministic → Dependabot.
-#   dependabot-base-image   Go stdlib (= the golang builder image) and base images → Dependabot
-#   dockerfile-binary       a Go binary the Dockerfile downloads (e.g. grpc_health_probe) → bump its pin
-#                           `docker` ecosystem bumps the FROM lines.
-#   copa-os                 OS packages → Copa patches the BUILT image (pushed as <repo>:src-<d>-patched)
-#                           and re-scans it; Copa never changes the Dockerfile or the PR.
+#   base-image              OS packages, and Go stdlib (= the golang builder image): a newer base
+#                           image fixes them → Dependabot `docker` ecosystem bumps the FROM line.
+#   dockerfile              an OS package the Dockerfile installs itself (`apk add` / `apt-get
+#                           install`) → pin or upgrade it on that line (reported, not auto-applied).
+#   dockerfile-binary       a Go binary the Dockerfile downloads (e.g. grpc_health_probe) → bump its pin.
 # A commit pushed with GITHUB_TOKEN does NOT trigger new workflow runs: pass a GitHub App
 # (secrets SYNC_APP_ID + SYNC_APP_PRIVATE_KEY, contents:write) so the builds re-run on the commit.
 name: 🛡️ pr-security-synchronizer
@@ -36,14 +38,6 @@ on:
         description: "Apply fixes for findings at or above: none | critical | high | medium | low"
         type: string
         default: none
-      copa:
-        description: Patch OS packages of the scanned images with Copa and re-scan them
-        type: boolean
-        default: false
-      copa-severity:
-        description: "Run Copa on images with fixable OS findings at or above this (default: accept-trivy-job-patches). Copa only touches the image, never the PR, so it may be broader than the commit level."
-        type: string
-        default: ""
       build-pattern:
         description: Regex matching build check-run names (default = docker-multiarch-cicd's build jobs)
         type: string
@@ -91,7 +85,6 @@ permissions:
   pull-requests: write
   checks: read
   actions: read
-  packages: write
 
 env:
   OUT_DIR: pr-security-sync
@@ -106,8 +99,6 @@ jobs:
       cancel-in-progress: true
     outputs:
       has_patches: ${{ steps.collect.outputs.has_patches }}
-      has_copa: ${{ steps.collect.outputs.has_copa }}
-      copa_matrix: ${{ steps.collect.outputs.copa_matrix }}
     steps:
       - name: Checkout the PR (compose file → service build contexts)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -132,7 +123,6 @@ jobs:
           IGNORE_PATTERN: ${{ inputs.ignore-pattern }}
           COMPOSE_FILE: ${{ inputs.docker-compose-file-name }}
           ACCEPT_LEVEL: ${{ inputs.accept-trivy-job-patches }}
-          COPA_SEVERITY: ${{ inputs.copa-severity }}
           POLL_INTERVAL: ${{ inputs.poll-interval-seconds }}
           TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
         run: python3 .pr-security-sync/actions/docker/pr-security-sync/sync.py collect
@@ -207,52 +197,9 @@ jobs:
           path: ${{ env.OUT_DIR }}/patches.json
           retention-days: 30
 
-  copa:
-    name: 🧩 copa ${{ matrix.service }}
-    needs: collect
-    if: inputs.copa && needs.collect.outputs.has_copa == 'true'
-    runs-on: ${{ inputs.github-actions-runner }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.collect.outputs.copa_matrix) }}
-    steps:
-      - name: Start BuildKit for Copa (digest-pinned)
-        run: |
-          docker run --detach --rm --privileged --name buildkitd -p 127.0.0.1:8888:8888 \
-            moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea \
-            --addr tcp://0.0.0.0:8888 >/dev/null
-      - name: Checkout the synchronizer helpers
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          repository: ohanalabs-ai/github-platform
-          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
-          path: .pr-security-sync
-          sparse-checkout: actions/docker
-          persist-credentials: false
-      - name: Install Trivy + Copa (checksum-pinned)
-        env:
-          INSTALL_COPA: "true"
-        run: bash .pr-security-sync/actions/docker/image-security/install.sh
-      - name: Registry login (ghcr.io, push the patched image)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin >/dev/null
-      - name: Copa patch + re-scan
-        env:
-          IMAGE: ${{ matrix.image }}
-          SERVICE: ${{ matrix.service }}
-          BUILDKIT_ADDR: tcp://127.0.0.1:8888
-        run: bash .pr-security-sync/actions/docker/pr-security-sync/copa.sh
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: pr-security-sync-copa-${{ matrix.service }}
-          path: ${{ env.OUT_DIR }}/copa
-          retention-days: 30
-
   decide:
     name: ⚖️ decide
-    needs: [collect, patch, copa]
+    needs: [collect, patch]
     if: always() && needs.collect.result == 'success'
     runs-on: ${{ inputs.github-actions-runner }}
     outputs:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Trivy and Syft (and, with INSTALL_COPA=true, Copa) from their GitHub release tarballs, each checked against a sha256 pinned
+# Install Trivy and Syft from their GitHub release tarballs, each checked against a sha256 pinned
 # in THIS file (pins and approach adopted from ohanalabs-ai/github-platform PR #35's
 # actions/images/toolchain/install.sh). Trivy is deliberately NOT installed through
 # aquasecurity/trivy-action or setup-trivy: their tags were compromised (GHSA-69fq-xp46-6x23).
@@ -7,7 +7,6 @@ set -euo pipefail
 BIN_DIR="${BIN_DIR:-$RUNNER_TEMP/image-security-bin}"
 TRIVY_VERSION=0.74.0
 SYFT_VERSION=1.52.0
-COPA_VERSION=0.15.0   # project-copacetic/copacetic — OS-package patching of built images (pr-security-synchronizer)
 case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;; esac
 sha() {
   case "$1-$arch" in
@@ -15,8 +14,6 @@ sha() {
     trivy-arm64) echo b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5 ;;
     syft-amd64)  echo caeedb81fb0491615f1ebd1761e4145d41ee86dd2cc7bf80669f9f5ad9d6133d ;;
     syft-arm64)  echo c46d5e4c28e12aa4c5becfaa343ef1c7f89045b6b895f2c21d471c62db09c706 ;;
-    copa-amd64)  echo cff3fe9320f3bd24bafcfd0ce877ef57e23acad0836da0ac6c253919f71c9cad ;;
-    copa-arm64)  echo 2444b6109c6164beef980641ec5f2813bc42b1703add6dd73591ace23051ca8f ;;
   esac
 }
 verified() { # tool url dest
@@ -29,10 +26,5 @@ verified trivy "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY
 tar -xzf "$work/trivy.tgz" -C "$BIN_DIR" trivy
 verified syft "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${arch}.tar.gz" "$work/syft.tgz"
 tar -xzf "$work/syft.tgz" -C "$BIN_DIR" syft
-if [ "${INSTALL_COPA:-false}" = true ]; then
-  verified copa "https://github.com/project-copacetic/copacetic/releases/download/v${COPA_VERSION}/copa_${COPA_VERSION}_linux_${arch}.tar.gz" "$work/copa.tgz"
-  tar -xzf "$work/copa.tgz" -C "$BIN_DIR" copa
-fi
 echo "$BIN_DIR" >> "$GITHUB_PATH"
 "$BIN_DIR/trivy" --version | head -1; "$BIN_DIR/syft" version | grep -E '^Version' || true
-[ -x "$BIN_DIR/copa" ] && "$BIN_DIR/copa" --version 2>/dev/null | head -1 || true

@@ -85,11 +85,10 @@ on:
 jobs:
   sync:
     uses: ohanalabs-ai/github-platform/.github/workflows/pr-security-synchronizer.yaml@main
-    permissions: { contents: write, pull-requests: write, checks: read, actions: read, packages: write }
+    permissions: { contents: write, pull-requests: write, checks: read, actions: read }
     secrets: inherit                     # optional SYNC_APP_ID / SYNC_APP_PRIVATE_KEY
     with:
       accept-trivy-job-patches: critical # none | critical | high | medium | low
-      copa: true
 ```
 
 What it does, all inside the reusable:
@@ -99,19 +98,26 @@ What it does, all inside the reusable:
    them by workflow run (= one service) and classifies them: build (`🏗️ pr-build`/`ref-build`),
    scan (`🛡️ image security`), other. Downloads each scan's `image-security-report` artifact
    (trivy.json + `image-security-meta.json`) and links it.
-2. **Fix paths** — every finding gets one: `copa-os` (OS package), `commit-go` / `commit-pip`
-   (deterministic language bump), `dependabot-base-image` (Go stdlib = the golang builder image),
-   `dependabot-lang` (npm, maven/gradle, nuget, …), `none` (no fixed version).
+2. **Fix paths** — every finding gets one, and every one is a **declarative source change that
+   rebuilds the image**: `commit-go` / `commit-pip` (deterministic language bump), `base-image`
+   (OS packages and Go stdlib — a newer base fixes them; Dependabot `docker` bumps the `FROM`),
+   `dockerfile` (an OS package the Dockerfile installs itself via `apk add` / `apt-get install` — pin
+   or upgrade it on that line), `dockerfile-binary` (a binary the Dockerfile downloads, e.g.
+   `grpc_health_probe` — bump its pin), `dependabot-lang` (npm, maven/gradle, nuget, …), `none` (no
+   fixed version).
 3. **Patch** (`accept-trivy-job-patches` ≠ `none`) — ONE commit on the PR branch with the
    deterministic bumps at or above the level: `go get mod@fixed` (kept only while the module's `go`
    directive stays within the Dockerfile's `golang:` builder) and pip-compile pins (kept only if pip
    still resolves). A commit pushed with `GITHUB_TOKEN` does not re-trigger workflows — give it a
    GitHub App (`SYNC_APP_ID`, `SYNC_APP_PRIVATE_KEY`) so the builds re-run on the fix.
-4. **Copa** (`copa: true`) — patches the OS packages of each built image from Trivy's OS report
-   (Copa v0.15.0, BuildKit by digest), pushes `<repo>:src-<digest>-patched`, re-scans it. Copa never
-   edits the Dockerfile or the PR; the patched image is a deployable alternative, reported as such.
-5. **Decide** — one table (sticky comment + summary) and the verdict: fails when a build failed or
+4. **Decide** — one table (sticky comment + summary) and the verdict: fails when a build failed or
    any image is still above its policy. The failure is the reusable's, never the caller's.
+
+**No post-build image patching.** Copa (and any tool that rewrites layers of an already-built image)
+is deliberately not used: a patched image no longer matches what the repository declares, which
+breaks the rule that GitOps configuration is declarative — what runs must be reproducible from the
+repo. OS-package fixes therefore come from a newer base image (Dependabot `docker`) or an explicit
+Dockerfile change, and the image is rebuilt and re-scanned by the normal pipeline.
 
 **Why polling and not `workflow_run`:** `workflow_run` only fires from workflow files already on the
 default branch (it cannot be validated in the PR that introduces it) and the caller would have to
