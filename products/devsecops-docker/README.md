@@ -74,14 +74,19 @@ jobs:
   scan:
     name: 🛡️ scan
     needs: docker
-    if: needs.docker.outputs.image_ref != ''
     uses: ohanalabs-ai/github-platform/.github/workflows/docker-images-devsecops-scan.yaml@main
     permissions: { contents: read, packages: read }
     with:
       images: ${{ needs.docker.outputs.image_ref }}
       severity-threshold: CRITICAL   # accept everything below CRITICAL
+      options: '{"version":1,"allow-empty":true}'   # a closed PR builds nothing → nothing to scan
       artifact-prefix: imgsec
 ```
+
+Keep the caller thin — only `needs`, `uses`, `permissions` and `with`. The policy decision and the
+failure live inside the scan reusable: its report job exits non-zero on `policy-fail`, so the run
+goes red there (shift-left). An empty `image_ref` (closed PR) is handled by the scanner's own
+`allow-empty` option, not by a caller-side `if:`.
 
 ## Jobs
 
