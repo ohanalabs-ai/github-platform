@@ -26,6 +26,7 @@ PR
  ├─ <group job>  (uses: gitops-argocd-group.yaml, mode: diff)          ← one per group, static list
  │    🧭 discover        changed files ∩ watch-paths → units (discover-command)
  │    🧩 render <app>    kustomize | render plugin | helm template (multi-source): base vs head per object
+ │    🧪 kustomize check schema · removed APIs · image availability of the rendered units — PRE-CONDITION of 🔍 diff (devsecops-kubernetes)
  │    🔍 diff <app>      argocd app diff --revision <PR head> → verdict (blocks a noop)
  │    📋 result          table + sticky comment gitops-<cluster>-<group> + group.json
  └─ <scope> gate         (uses: gitops-argocd-gate.yaml) — the ONE required status per scope
@@ -68,8 +69,13 @@ merge
 | `comment-header` | `gitops-<cluster>-<group>` | sticky comment header — keep it so existing comments keep updating |
 | `sticky-comment` | `true` | post the group comment (mode=diff, pull_request events) |
 | `tailscale-tags` | `tag:ci` | tags of the ephemeral tailnet node |
+| `manifest-check` | `true` | the `🧪 kustomize check` job (mode=diff): an error skips every `🔍 diff` → the group and the 🚦 gate fail — [devsecops-kubernetes](../devsecops-kubernetes/README.md) |
+| `manifest-check-policy` | `enforce` | `warn` = report only |
+| `kubernetes-version` | `1.35.0` | the cluster's Kubernetes for the check (schemas + removed APIs) |
+| `required-platforms` | `linux/amd64` | every image must provide these |
+| `manifest-check-fail-on-unverifiable` | `false` | an image this run cannot see (private / rate-limited) fails instead of warning |
 
-Secrets: `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` (Tailscale OAuth client; unset → *skipped-no-tailnet*), `ARGOCD_AUTH_TOKEN` (pre-Vault fallback only). **Pass them explicitly** — `secrets: inherit` did not deliver a caller org's secrets (organization secrets scoped to selected repositories, in `planeodev`) to this workflow hosted in `ohanalabs-ai`: every live unit read *skipped (no Tailscale OAuth secrets)* at job and step level (2026-09-23) while the caller's previous inline workflow saw them. The gate workflow declares no secrets (`secrets: inherit` or nothing).
+Secrets: `GCP_ACCESS_TOKEN` (optional, Artifact Registry images in the kustomize check), `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` (Tailscale OAuth client; unset → *skipped-no-tailnet*), `ARGOCD_AUTH_TOKEN` (pre-Vault fallback only). **Pass them explicitly** — `secrets: inherit` did not deliver a caller org's secrets (organization secrets scoped to selected repositories, in `planeodev`) to this workflow hosted in `ohanalabs-ai`: every live unit read *skipped (no Tailscale OAuth secrets)* at job and step level (2026-09-23) while the caller's previous inline workflow saw them. The gate workflow declares no secrets (`secrets: inherit` or nothing).
 
 Gate inputs (`gitops-argocd-gate.yaml`): `results-json` (`${{ toJson(needs) }}`, required), `title` (`GitOps`), `comment` (`true`), `mode` (`diff`).
 
@@ -149,7 +155,7 @@ Always `@main` for callers (org-owned repo; callers track the latest reviewed ve
 
 ## Job names and required statuses
 
-A caller job that `uses:` a reusable workflow produces no check of its own — only the nested jobs do (`🧱 core / 🧭 discover`, `🧱 core / 🧩 render cert-manager`, `🧱 core / 🔍 diff cert-manager`, `🧱 core / 📋 result`), and those vary per PR. Require the **gate**: `<caller gate job name> / 🚦 gate`. Name every caller's gate job distinctly (`🚦 platform gate`, `🚦 demos gate`, `🚦 vault gate`, `🚦 customers gate`): GitHub keys a status by its name, so several workflows all reporting `🚦 gate` would overwrite each other and a passing scope could mask a failing one. Migrating a repo's single-workflow checks (e.g. a bare `📋 result`) to these callers **renames its required statuses** — update branch protection in the same change.
+A caller job that `uses:` a reusable workflow produces no check of its own — only the nested jobs do (`🧱 core / 🧭 discover`, `🧱 core / 🧩 render cert-manager`, `🧱 core / 🧪 kustomize check`, `🧱 core / 🔍 diff cert-manager`, `🧱 core / 📋 result`), and those vary per PR. Require the **gate**: `<caller gate job name> / 🚦 gate`. Name every caller's gate job distinctly (`🚦 platform gate`, `🚦 demos gate`, `🚦 vault gate`, `🚦 customers gate`): GitHub keys a status by its name, so several workflows all reporting `🚦 gate` would overwrite each other and a passing scope could mask a failing one. Migrating a repo's single-workflow checks (e.g. a bare `📋 result`) to these callers **renames its required statuses** — update branch protection in the same change.
 
 ## Toolchain: `tools-image` vs pinned releases
 

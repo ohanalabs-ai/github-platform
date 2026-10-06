@@ -1,0 +1,32 @@
+# Fixture for kubernetes-kustomize-selftest.yaml: every check must flag this one —
+# a tag that does not exist (error), a removed apiVersion (error), a schema violation (error).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken
+spec:
+  replicas: "two"
+  selector:
+    matchLabels: {app: broken}
+  template:
+    metadata:
+      labels: {app: broken}
+    spec:
+      containers:
+        - name: web
+          image: nginx:0.0.0-does-not-exist
+---
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: legacy
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: c
+              image: busybox:1.36

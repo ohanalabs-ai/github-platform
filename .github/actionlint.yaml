@@ -19,3 +19,7 @@ paths:
   .github/workflows/pr-security-synchronizer.yaml:
     ignore:
       - 'property "(job_)?workflow_sha" is not defined in object type'
+  # kubernetes-kustomize-devsecops.yaml checks out actions/kubernetes/manifest-check the same way.
+  .github/workflows/kubernetes-kustomize-devsecops.yaml:
+    ignore:
+      - 'property "(job_)?workflow_sha" is not defined in object type'

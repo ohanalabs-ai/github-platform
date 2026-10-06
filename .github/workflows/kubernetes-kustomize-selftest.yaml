@@ -1,0 +1,82 @@
+# 🧪 Self-test of kubernetes-kustomize-devsecops.yaml (and so of the 🧪 kustomize check that
+# gitops-argocd-group.yaml runs before every ArgoCD diff) on THIS repo's pull requests: the real
+# reusable against tests/kubernetes/manifest-check fixtures, real registries, no cluster, no secrets.
+#   good/  a public digest-pinned multi-arch image — must PASS under policy=enforce
+#   bad/   a missing tag + a removed apiVersion + a schema violation — run with policy=warn, and
+#          the verdict job asserts exactly 3 errors were reported
+# The unit tests (node:test) run in actions-typescript-selftest.yaml.
+name: 🧪 kubernetes-kustomize-selftest
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/kubernetes-kustomize-*.yaml"
+      - ".github/workflows/gitops-argocd-group.yaml"
+      - "actions/kubernetes/**"
+      - "tests/kubernetes/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/kubernetes-kustomize-*.yaml"
+      - "actions/kubernetes/**"
+      - "tests/kubernetes/**"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: 🚨 actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: ⚙️ actionlint
+        run: docker run --rm -v "$PWD":/repo --workdir /repo rhysd/actionlint:1.7.12 -color .github/workflows/kubernetes-kustomize-devsecops.yaml .github/workflows/kubernetes-kustomize-selftest.yaml .github/workflows/gitops-argocd-group.yaml
+
+  good:
+    name: ✅ good
+    uses: ./.github/workflows/kubernetes-kustomize-devsecops.yaml
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    with:
+      paths: tests/kubernetes/manifest-check/good
+      title: selftest good
+      comment: false
+
+  bad:
+    name: ❌ bad
+    uses: ./.github/workflows/kubernetes-kustomize-devsecops.yaml
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    with:
+      paths: tests/kubernetes/manifest-check/bad
+      policy: warn
+      title: selftest bad
+      comment: false
+
+  verdict:
+    name: 🧾 verdict
+    needs: [good, bad]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: good passed with 0 errors; bad reported exactly 3
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          GOOD: ${{ needs.good.result }}
+          GOOD_ERRORS: ${{ needs.good.outputs.errors }}
+          BAD: ${{ needs.bad.result }}
+          BAD_ERRORS: ${{ needs.bad.outputs.errors }}
+        with:
+          script: |
+            const e = process.env;
+            const fails = [];
+            if (e.GOOD !== 'success' || e.GOOD_ERRORS !== '0') fails.push(`good: ${e.GOOD}, errors=${e.GOOD_ERRORS}`);
+            if (e.BAD !== 'success' || e.BAD_ERRORS !== '3') fails.push(`bad (policy=warn): ${e.BAD}, errors=${e.BAD_ERRORS} (want 3)`);
+            if (fails.length) core.setFailed(fails.join(' · ')); else core.info('ok: good=0 errors, bad=3 errors');
