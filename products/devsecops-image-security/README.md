@@ -63,8 +63,15 @@ and the blocking findings.
 
 ## Supply-chain notes
 
+- **All logic is TypeScript run by `actions/github-script`** — `actions/docker/image-security/`
+  `install.ts`, `resolve.ts`, `sbom.ts`, `scan.ts`, `report.ts`, `comment.ts`, `gate.ts`, each loaded
+  with `await import(<path>.ts)`; github-script v8 runs on Node 24, which strips erasable TypeScript
+  types natively, so there is no build step and **no npm dependency** (Node built-ins + what
+  github-script injects). No Python, no bash logic. `report.test.ts` (node:test) is run by
+  `.github/workflows/actions-typescript-selftest.yaml`, which also fails on any `*.py`/`*.pyc` under
+  `actions/`.
 - Trivy and Syft come from their release tarballs, each checked against a sha256 pinned in
-  `install.sh`. Trivy is not installed through `aquasecurity/trivy-action` or `setup-trivy`, whose
+  `install.ts`. Trivy is not installed through `aquasecurity/trivy-action` or `setup-trivy`, whose
   tags were compromised (GHSA-69fq-xp46-6x23). The pins come from PR #35's toolchain.
 - Registry access: `ghcr.io` with the run's `GITHUB_TOKEN` (`packages: read`); other registries
   anonymously.

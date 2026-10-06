@@ -1,0 +1,51 @@
+# 🧪 actions-typescript-selftest — guards the org rule that ALL action logic is TypeScript run by
+# actions/github-script (no npm dependencies, no Python/bash logic):
+#   1. no Python (*.py / *.pyc) anywhere under actions/
+#   2. the TypeScript self-tests (*.test.ts, node:test + node:assert) pass on github-script's own
+#      Node 24 runtime — the same runtime that executes the actions (native type stripping)
+name: 🧪 actions-typescript-selftest
+
+on:
+  pull_request:
+    paths:
+      - "actions/**"
+      - ".github/workflows/actions-typescript-selftest.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "actions/**"
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: 🧪 TypeScript actions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: No Python under actions/
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { readdirSync, statSync } = await import('node:fs');
+            const { join } = await import('node:path');
+            const bad = [];
+            const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walk(p) : (/\.pyc?$/.test(n) && bad.push(p)); } };
+            walk('actions');
+            if (bad.length) core.setFailed('Python is not allowed under actions/ (use TypeScript via actions/github-script): ' + bad.join(', '));
+            else core.info('no Python under actions/');
+      - name: TypeScript self-tests (node:test on github-script's Node 24)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { readdirSync, statSync } = await import('node:fs');
+            const { join } = await import('node:path');
+            const tests = [];
+            const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walk(p) : (n.endsWith('.test.ts') && tests.push(p)); } };
+            walk('actions');
+            core.info(`node ${process.version}: ${tests.length} test file(s)`);
+            if (tests.length) await exec.exec(process.execPath, ['--test', ...tests]);
