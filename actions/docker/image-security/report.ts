@@ -7,7 +7,8 @@
 // comment per image. A vulnerability section and the policy verdict are added below it.
 //
 // buildReport() is pure (unit-tested by report.test.ts); run() is the github-script entry point.
-// Inputs (env): SBOM, TRIVY_JSON, IMAGE, DIGEST, REVISION, THRESHOLD, IGNORE_UNFIXED, SBOM_ORIGIN, OUT_MD.
+// Inputs (env): SBOM, TRIVY_JSON, IMAGE, DIGEST, REVISION, THRESHOLD, IGNORE_UNFIXED, SBOM_ORIGIN, OUT_MD,
+// OUT_META (optional: also write the verdict as JSON — consumed by pr-security-synchronizer.yaml).
 // Outputs: status (pass|policy-fail), <severity>-count, blocking-count, package-count.
 import { readFileSync, writeFileSync } from "node:fs";
 import type { Ctx } from "./types.ts";
@@ -128,6 +129,14 @@ export default async function run({ core }: Ctx): Promise<void> {
     return core.setFailed(e instanceof Error ? e.message : String(e));
   }
   writeFileSync(env.OUT_MD || "image-security-report.md", r.md);
+  if (env.OUT_META) {
+    const threshold = (env.THRESHOLD || "CRITICAL").toUpperCase();
+    writeFileSync(env.OUT_META, JSON.stringify({
+      version: 1, image: env.IMAGE || "", digest: env.DIGEST || "", revision: env.REVISION || "",
+      threshold, ignore_unfixed: (env.IGNORE_UNFIXED || "false").toLowerCase() === "true",
+      sbom_origin: env.SBOM_ORIGIN || "", status: r.status, counts: r.counts, blocking: r.blocking.length,
+    }));
+  }
   await core.summary.addRaw(r.md).write();
   core.setOutput("status", r.status);
   for (const s of ORDER) core.setOutput(`${s.toLowerCase()}-count`, r.counts[s]);

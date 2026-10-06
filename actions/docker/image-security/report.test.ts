@@ -67,3 +67,12 @@ test("repoOf strips tag/digest, keeps registry ports", () => {
   assert.equal(repoOf("localhost:5000/svc:1"), "localhost:5000/svc");
   assert.equal(repoOf("localhost:5000/svc"), "localhost:5000/svc");
 });
+
+import { declaresOs, mergeResults } from "./os.ts";
+test("OS: detects an SBOM that declares the OS; merges OS results", () => {
+  assert.equal(declaresOs({ packages: [{ primaryPackagePurpose: "OPERATING-SYSTEM" }] }), true);
+  assert.equal(declaresOs(sbom), false);
+  const m = mergeResults({ Results: [{ Class: "lang-pkgs", Vulnerabilities: [] }] }, { Results: [{ Class: "os-pkgs", Vulnerabilities: [{}] }] });
+  assert.equal(m.Results?.length, 2);
+  assert.equal(m.Results?.[1].Class, "os-pkgs");
+});

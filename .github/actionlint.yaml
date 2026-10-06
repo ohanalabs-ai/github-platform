@@ -15,3 +15,7 @@ paths:
   .github/workflows/docker-image-security.yaml:
     ignore:
       - 'property "(job_)?workflow_sha" is not defined in object type'
+  # pr-security-synchronizer.yaml checks out actions/docker/{pr-security-sync,image-security} the same way.
+  .github/workflows/pr-security-synchronizer.yaml:
+    ignore:
+      - 'property "(job_)?workflow_sha" is not defined in object type'
