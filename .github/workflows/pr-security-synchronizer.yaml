@@ -14,6 +14,9 @@
 # excludes this run's own jobs by RUN ID (not by name), and its job-level concurrency group cancels
 # an older poller when the PR gets a new push.
 #
+# LOGIC: every logic step is actions/github-script loading actions/docker/pr-security-sync/sync.ts
+# (collect / patch / push / decide) — pure TypeScript, Node built-ins only, no npm/Python/bash.
+#
 # FIXES — who does what. Every fix is a DECLARATIVE source change that rebuilds the image (owner
 # rule: GitOps configuration is declarative). Post-build image patching (e.g. Copa) is REJECTED —
 # it mutates a built image, so what runs no longer matches what the repo declares.
@@ -125,7 +128,11 @@ jobs:
           ACCEPT_LEVEL: ${{ inputs.accept-trivy-job-patches }}
           POLL_INTERVAL: ${{ inputs.poll-interval-seconds }}
           TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
-        run: python3 .pr-security-sync/actions/docker/pr-security-sync/sync.py collect
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { collect } = await import(`${process.env.GITHUB_WORKSPACE}/.pr-security-sync/actions/docker/pr-security-sync/sync.ts`);
+            await collect({ core, exec, github, context });
       - name: Upload the consolidated data
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -175,21 +182,21 @@ jobs:
         env:
           GOTOOLCHAIN: auto
           GOFLAGS: -mod=mod
-        run: python3 .pr-security-sync/actions/docker/pr-security-sync/sync.py patch
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { patch } = await import(`${process.env.GITHUB_WORKSPACE}/.pr-security-sync/actions/docker/pr-security-sync/sync.ts`);
+            await patch({ core, exec, github, context });
       - name: Commit + push (one commit)
         id: push
         env:
           LEVEL: ${{ inputs.accept-trivy-job-patches }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          set -euo pipefail
-          git add -A -- . ':!.pr-security-sync' ':!pr-security-sync'
-          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
-          git -c user.name="pr-security-synchronizer[bot]" -c user.email="pr-security-synchronizer@users.noreply.github.com" \
-            commit -q -m ":lock: deps: apply Trivy fixes at or above ${LEVEL} (pr-security-synchronizer)"
-          git push -q origin "HEAD:${HEAD_REF}"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          [ "$HAS_APP" = true ] || echo "::warning::fix commit pushed with GITHUB_TOKEN — it will NOT re-trigger the builds; pass SYNC_APP_ID/SYNC_APP_PRIVATE_KEY or push an empty commit"
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { push } = await import(`${process.env.GITHUB_WORKSPACE}/.pr-security-sync/actions/docker/pr-security-sync/sync.ts`);
+            await push({ core, exec, github, context });
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -223,7 +230,11 @@ jobs:
         id: decide
         env:
           PATCH_COMMIT: ${{ needs.patch.outputs.commit }}
-        run: python3 .pr-security-sync/actions/docker/pr-security-sync/sync.py decide
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { decide } = await import(`${process.env.GITHUB_WORKSPACE}/.pr-security-sync/actions/docker/pr-security-sync/sync.ts`);
+            await decide({ core, exec, github, context });
       - name: Sticky PR comment
         if: always() && inputs.add-pr-comment && github.event_name == 'pull_request' && steps.decide.outcome != 'skipped'
         uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5

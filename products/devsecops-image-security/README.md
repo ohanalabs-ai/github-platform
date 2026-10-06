@@ -120,6 +120,10 @@ What it does, all inside the reusable:
 4. **Decide** — one table (sticky comment + summary) and the verdict: fails when a build failed or
    any image is still above its policy. The failure is the reusable's, never the caller's.
 
+Every step runs `actions/docker/pr-security-sync/sync.ts` (`collect` / `patch` / `push` / `decide`)
+through `actions/github-script` — TypeScript with Node built-ins only, self-tested by `sync.test.ts`
+in `actions-typescript-selftest.yaml`.
+
 **No post-build image patching.** Copa (and any tool that rewrites layers of an already-built image)
 is deliberately not used: a patched image no longer matches what the repository declares, which
 breaks the rule that GitOps configuration is declarative — what runs must be reproducible from the
