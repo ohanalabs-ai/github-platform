@@ -1,0 +1,98 @@
+# Expected: every job RED (each failure mode); the run is red by design.
+# Test caller for https://github.com/ohanalabs-ai/github-platform/pull/35 — calls the reusable by LOCAL path,
+# so every job exercises exactly the commit under review. Each job uses a distinct artifact-prefix.
+name: 🧪 imgsec negative suite
+on:
+  pull_request:
+    branches: [copilot/implement-manifest-driven-security]
+    paths: [".github/workflows/test-imgsec-*.yaml", ".github/workflows/docker-images-devsecops-scan.yaml", "actions/images/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  n01-bad-ref:
+    name: 🧪 N01 non-existent image → error
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "docker.io/library/imgsec-does-not-exist-zz:0"
+      artifact-prefix: "n01"
+
+  n02-disallowed-registry:
+    name: 🧪 N02 registry not in allowed-registries → error
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "alpine:3.20"
+      options: '{"version":1,"allowed-registries":["ghcr.io"]}'
+      artifact-prefix: "n02"
+
+  n03-policy-fail:
+    name: 🧪 N03 CRITICAL findings → policy-fail fails the run
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "node:14"
+      severity-threshold: "CRITICAL"
+      platforms: "linux/amd64"
+      artifact-prefix: "n03"
+
+  n04-missing-platform:
+    name: 🧪 N04 requested platform missing → error
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "us-central1-docker.pkg.dev/google-samples/microservices-demo/frontend:v0.10.3"
+      platforms: "linux/s390x"
+      artifact-prefix: "n04"
+
+  n05-empty-no-allow:
+    name: 🧪 N05 empty images without allow-empty → error
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: ""
+      artifact-prefix: "n05"
+
+  n06-credential-in-input:
+    name: 🧪 N06 credential value inside a JSON input → rejected
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "alpine:3.20"
+      registry-auth-profiles: '{"version":1,"registries":{"docker.io":{"type":"secret","source":"dockerhub","password":"not-a-real-secret"}}}'
+      artifact-prefix: "n06"
+
+  n07-bad-prefix:
+    name: 🧪 N07 invalid artifact-prefix → error
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "alpine:3.20"
+      artifact-prefix: "Bad_Prefix!"
+
+  n08-require-verified:
+    name: 🧪 N08 sbom-policy=require-verified on an unattested image → fail
+    uses: ./.github/workflows/docker-images-devsecops-scan.yaml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      images: "busybox:1.37"
+      sbom-policy: "require-verified"
+      platforms: "linux/amd64"
+      artifact-prefix: "n08"
