@@ -127,7 +127,10 @@ jobs:
           set -euo pipefail
           origin=""
           if [ "$SBOM_SOURCE" = build ]; then
+            # The SBOM attestation is signed by the BUILD reusable's identity (this org's
+            # docker-multiarch-cicd.yaml), not by the caller's repo — verify against that signer.
             if gh attestation verify "oci://$REF" --owner "${GITHUB_REPOSITORY_OWNER}" \
+                 --signer-repo ohanalabs-ai/github-platform \
                  --predicate-type https://spdx.dev/Document/v2.3 --format json > att.json 2>/dev/null \
                && jq -e '.[0].verificationResult.statement.predicate' att.json > sbom.spdx.json 2>/dev/null; then
               origin="build attestation (GitHub, verified)"
