@@ -128,6 +128,16 @@ on:
       effective_ref:
         description: Git ref name (branch or tag) used for the build. Empty when ref-build was skipped.
         value: ${{ jobs.ref-build.outputs.effective_ref }}
+      image_ref:
+        description: >-
+          Digest-pinned reference (<image-base>@sha256:…) of the image THIS run built — the PR build
+          (<base>/pr/<N>@…), the branch/ref build, or the tag release build, whichever ran. Empty when
+          nothing was built (e.g. a closed PR). Use it to compose a job that `needs` the build, such
+          as an image scan: `needs: <build-job>` and pass `needs.<build-job>.outputs.image_ref`.
+        value: ${{ jobs.pr-build.outputs.image_ref || jobs.ref-build.outputs.image_ref || jobs.release-build.outputs.image_ref }}
+      image_digest:
+        description: Digest (sha256:…) of the image this run built (PR, ref or release build). Empty when nothing was built.
+        value: ${{ jobs.pr-build.outputs.image_digest || jobs.ref-build.outputs.image_digest || jobs.release-build.outputs.image_digest }}
 
 # Set of permissions needed by the workflow
 permissions:
@@ -172,6 +182,11 @@ jobs:
     timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ${{ inputs.github-actions-runner }}
+    # Exposed so a caller can compose a job that `needs` this build (e.g. an image scan) on PRs too.
+    outputs:
+      image_base: ${{ steps.pr_digest.outputs.image_base }}
+      image_digest: ${{ steps.pr_digest.outputs.digest }}
+      image_ref: ${{ steps.pr_digest.outputs.digest && format('{0}@{1}', steps.pr_digest.outputs.image_base, steps.pr_digest.outputs.digest) || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -575,6 +590,7 @@ jobs:
       image_tag: ${{ steps.build_vars.outputs.image_tag }}
       image_description: ${{ steps.build_vars.outputs.image_description }}
       image_digest: ${{ steps.ref_build.outputs.digest }}
+      image_ref: ${{ steps.ref_build.outputs.digest && format('{0}@{1}', steps.ref_build.outputs.image-base, steps.ref_build.outputs.digest) || '' }}
       image_subject: ${{ steps.ref_build.outputs.subject }}
       report_title: SLSA verification (merge/ref build)
       pr_number: ${{ steps.build_vars.outputs.pr_number }}
@@ -813,6 +829,7 @@ jobs:
       short_sha: ${{ steps.vars.outputs.short_sha }}
       image_base: ${{ steps.release_ref_build.outputs.image-base }}
       image_digest: ${{ steps.release_ref_build.outputs.digest }}
+      image_ref: ${{ steps.release_ref_build.outputs.digest && format('{0}@{1}', steps.release_ref_build.outputs.image-base, steps.release_ref_build.outputs.digest) || '' }}
       image_subject: ${{ steps.release_ref_build.outputs.subject }}
       report_title: SLSA verification (release build)
     steps:
