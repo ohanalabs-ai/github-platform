@@ -1,0 +1,202 @@
+# 🧪 kubernetes-kustomize-devsecops — "will these manifests actually run?" for kustomize trees.
+# The reusable successor of ohanalabs-ai/oahana-github kubernetes-kustomize-devsecops-workflow.yaml
+# (vionix): its `kustomize build` + sticky-comment idea is kept; what it never checked is added.
+#
+#   1. 🧩 build      `kustomize build --enable-helm` every top-level kustomization under `paths`
+#                    (a dir no other kustomization pulls in as a resource/component — the overlays
+#                    someone applies; `all-kustomizations: true` builds every one)
+#   2. 📐 schema     kubeconform against the Kubernetes `kubernetes-version` schemas + the datree
+#                    CRDs-catalog (kinds with no schema anywhere are counted, not failed)
+#   3. 🗑️ removed    apiVersions removed at or before `kubernetes-version` (batch/v1beta1 CronJob…)
+#   4. 🐳 images     every image the objects would run (containers, initContainers, CR `*Image`
+#                    fields) resolved over the OCI distribution API: manifest exists → digest, and
+#                    the `required-platforms` are in it. Auth profiles: anonymous; ghcr.io with this
+#                    run's GITHUB_TOKEN (packages: read); Artifact Registry/gcr.io with an optional
+#                    GCP_ACCESS_TOKEN secret; Docker Hub with optional credentials. A missing image
+#                    or platform is an ERROR; an image the profile cannot see (private, rate-limited)
+#                    is a WARNING (`fail-on-unverifiable: true` makes it an error); floating tags
+#                    warn, tag-only references are noted (`require-digest: true` → error).
+#   5. 📋 report     job summary + one sticky PR comment (`comment-key`); the job FAILS here on any
+#                    error when `policy: enforce` — callers stay thin (uses + with + secrets).
+#
+# The same check runs INSIDE gitops-argocd-group.yaml (job `🧪 kustomize check`) on the rendered
+# units, as the PRE-CONDITION of the ArgoCD diff and therefore of the 🚦 gate — repos on the
+# devsecops-gitops product inherit it; use this reusable for kustomize trees ArgoCD does not watch.
+#
+# All logic is TypeScript run by actions/github-script v8 (Node 24, native type stripping, no npm):
+# actions/kubernetes/manifest-check/*.ts; tools from sha256-pinned releases (install.ts). Dropped
+# from the oahana-github workflow: the vionix DinD runner, kubectl v1.22 download, yamllint (kustomize
+# + kubeconform parse strictly), the in-workflow `argocd` CLI checks (gitops-argocd-group owns those),
+# Artifactory/Slack secrets.
+name: 🧪 kubernetes-kustomize-devsecops
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: "Kustomization roots, newline/comma separated (each: a kustomization dir, or a dir searched for top-level kustomizations)"
+        type: string
+        default: "."
+      kubernetes-version:
+        description: "Target Kubernetes (schemas + removed APIs), e.g. 1.35.0"
+        type: string
+        default: "1.35.0"
+      policy:
+        description: "enforce (errors fail the job) | warn (report only)"
+        type: string
+        default: enforce
+      required-platforms:
+        description: "Platforms every image must provide, comma separated"
+        type: string
+        default: linux/amd64
+      require-digest:
+        description: "Tag-only image references are errors"
+        type: boolean
+        default: false
+      fail-on-floating:
+        description: "Floating tags (:latest, :main, …) are errors instead of warnings"
+        type: boolean
+        default: false
+      fail-on-unverifiable:
+        description: "An image the auth profile cannot see (private / rate-limited) is an error instead of a warning"
+        type: boolean
+        default: false
+      check-images:
+        description: "Resolve image availability (false → build/schema/removed-API only)"
+        type: boolean
+        default: true
+      all-kustomizations:
+        description: "Build every kustomization under paths, not only the top-level ones"
+        type: boolean
+        default: false
+      kustomize-build-args:
+        description: "Extra `kustomize build` arguments"
+        type: string
+        default: "--enable-helm"
+      skip-kinds:
+        description: "kubeconform -skip (comma separated kinds)"
+        type: string
+        default: ""
+      schema-locations:
+        description: "Extra kubeconform -schema-location templates (newline separated)"
+        type: string
+        default: ""
+      kubeconform-strict:
+        description: "kubeconform -strict (unknown fields are errors)"
+        type: boolean
+        default: false
+      title:
+        description: "Report title"
+        type: string
+        default: kustomize
+      comment:
+        description: "Sticky PR comment on pull_request events"
+        type: boolean
+        default: true
+      comment-key:
+        description: "Sticky comment key (one comment per key)"
+        type: string
+        default: ""
+    secrets:
+      GCP_ACCESS_TOKEN:
+        description: "Optional OAuth access token for *-docker.pkg.dev / gcr.io (e.g. from WIF) — placeholder profile"
+        required: false
+      DOCKERHUB_USERNAME:
+        description: "Optional Docker Hub user (anonymous pulls are rate limited)"
+        required: false
+      DOCKERHUB_TOKEN:
+        description: "Optional Docker Hub token"
+        required: false
+    outputs:
+      errors:
+        description: "Number of errors"
+        value: ${{ jobs.check.outputs.errors }}
+      warnings:
+        description: "Number of warnings"
+        value: ${{ jobs.check.outputs.warnings }}
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: write
+
+jobs:
+  check:
+    name: 🧪 kustomize check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      errors: ${{ steps.check.outputs.errors }}
+      warnings: ${{ steps.check.outputs.warnings }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: 📥 manifest-check actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .kustomize-check
+          sparse-checkout: actions/kubernetes/manifest-check
+          persist-credentials: false
+
+      - name: 🧰 kustomize · helm · kubeconform · yq (sha256-pinned)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TOOLS: kustomize helm kubeconform
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.kustomize-check/actions/kubernetes/manifest-check/install.ts`);
+            await run({ core, exec, github, context });
+
+      - name: 🧪 build · schema · removed APIs · image availability
+        id: check
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SOURCE: kustomize
+          TARGETS: ${{ inputs.paths }}
+          KUBERNETES_VERSION: ${{ inputs.kubernetes-version }}
+          POLICY: ${{ inputs.policy }}
+          REQUIRED_PLATFORMS: ${{ inputs.required-platforms }}
+          REQUIRE_DIGEST: ${{ inputs.require-digest }}
+          FAIL_ON_FLOATING: ${{ inputs.fail-on-floating }}
+          FAIL_ON_UNVERIFIABLE: ${{ inputs.fail-on-unverifiable }}
+          CHECK_IMAGES: ${{ inputs.check-images }}
+          ALL_KUSTOMIZATIONS: ${{ inputs.all-kustomizations }}
+          KUSTOMIZE_BUILD_ARGS: ${{ inputs.kustomize-build-args }}
+          SKIP_KINDS: ${{ inputs.skip-kinds }}
+          SCHEMA_LOCATIONS: ${{ inputs.schema-locations }}
+          KUBECONFORM_STRICT: ${{ inputs.kubeconform-strict }}
+          TITLE: ${{ inputs.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OUT_DIR: ${{ runner.temp }}/kustomize-check
+          GHCR_TOKEN: ${{ github.token }}
+          GCP_ACCESS_TOKEN: ${{ secrets.GCP_ACCESS_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.kustomize-check/actions/kubernetes/manifest-check/check.ts`);
+            await run({ core, exec, github, context });
+
+      - name: 💬 sticky PR comment
+        if: always() && inputs.comment && github.event_name == 'pull_request' && steps.check.outputs.report != ''
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          REPORT_MD: ${{ steps.check.outputs.report }}
+          COMMENT_KEY: ${{ inputs.comment-key || inputs.title }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.kustomize-check/actions/kubernetes/manifest-check/comment.ts`);
+            await run({ core, exec, github, context });
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.check.outputs.result-json != ''
+        with:
+          name: kustomize-check-${{ inputs.comment-key || inputs.title }}
+          path: |
+            ${{ runner.temp }}/kustomize-check/report.md
+            ${{ runner.temp }}/kustomize-check/result.json
+          retention-days: 14

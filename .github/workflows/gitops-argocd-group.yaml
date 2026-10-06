@@ -8,6 +8,11 @@
 #   🧭 discover   changed files ∩ watch-paths → this group's units through the CALLER's
 #                 `discover-command` (the unit contract: {app,path,tier,local,multi_source,
 #                 render_only,plugin,manifest?,feeds?}) — actions/gitops/discover-units
+#   🧪 check      mode=diff, THE PRE-CONDITION (input manifest-check, ON by default): the rendered
+#                 units vs the cluster's Kubernetes schemas + CRD catalog, removed apiVersions, and
+#                 IMAGE AVAILABILITY (manifest resolves, required platform present; private images the
+#                 run cannot see warn). An error skips every 🔍 diff → the group and the 🚦 gate fail —
+#                 actions/kubernetes/manifest-check (TypeScript via github-script)
 #   🧩 render     THE PRIMARY SIGNAL, independent of ArgoCD: render the unit in the PR HEAD
 #                 and in the PR BASE (a second checkout), split per object, normalise, diff
 #                 → "expected change after merge": objects added/changed/removed + the
@@ -230,7 +235,35 @@ on:
         type: string
         required: false
         default: "tag:ci"
+      manifest-check:
+        description: "Run the 🧪 kustomize check (schema · removed APIs · image availability) on the rendered units as the PRE-CONDITION of the ArgoCD diff (mode=diff). ON by default — false is an explicit opt-out"
+        type: boolean
+        required: false
+        default: true
+      manifest-check-policy:
+        description: "enforce (an error fails the check → no ArgoCD diff → the 🚦 gate fails) | warn (report only)"
+        type: string
+        required: false
+        default: enforce
+      kubernetes-version:
+        description: "Target Kubernetes of the cluster for the kustomize check (schemas + removed APIs)"
+        type: string
+        required: false
+        default: "1.35.0"
+      required-platforms:
+        description: "Platforms every image must provide (the cluster's node architectures), comma separated"
+        type: string
+        required: false
+        default: linux/amd64
+      manifest-check-fail-on-unverifiable:
+        description: "An image this run's credentials cannot see (private / rate-limited) fails the check instead of warning"
+        type: boolean
+        required: false
+        default: false
     secrets:
+      GCP_ACCESS_TOKEN:
+        description: "Optional OAuth access token for *-docker.pkg.dev / gcr.io images in the kustomize check (placeholder profile)"
+        required: false
       TS_OAUTH_CLIENT_ID:
         description: "Tailscale OAuth client (tag:ci) — ArgoCD and Vault are tailnet-only; unset → the live steps report skipped-no-tailnet"
         required: false
@@ -380,13 +413,84 @@ jobs:
           path: ${{ runner.temp }}/frag/
           retention-days: 3
 
+  # THE PRE-CONDITION of the ArgoCD diff (and so of the caller's 🚦 gate): the rendered units —
+  # exactly what ArgoCD would apply — must validate against the cluster's Kubernetes schemas, use
+  # no removed apiVersion, and every image they run must exist with the required platform. One job
+  # for the whole group (each image is resolved once). An error here skips every `🔍 diff`, fails
+  # the group and therefore the gate. mode=diff only: after a merge the refresh must not be held.
+  # Logic: actions/kubernetes/manifest-check/*.ts (TypeScript via github-script); the standalone
+  # reusable for trees ArgoCD does not watch is kubernetes-kustomize-devsecops.yaml.
+  check:
+    name: 🧪 kustomize check
+    needs: [discover, render]
+    if: always() && inputs.manifest-check && inputs.mode == 'diff' && needs.discover.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 📥 manifest-check actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.PLATFORM_DIR }}
+          sparse-checkout: actions/kubernetes/manifest-check
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          pattern: rendered-${{ inputs.cluster }}-*
+          path: rendered
+
+      - name: 🧰 kubeconform · yq (sha256-pinned)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TOOLS: kubeconform
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.PLATFORM_DIR}/actions/kubernetes/manifest-check/install.ts`);
+            await run({ core, exec, github, context });
+
+      - name: 🧪 schema · removed APIs · image availability
+        id: check
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SOURCE: rendered
+          TARGETS: rendered
+          UNIT_PREFIX: rendered-${{ inputs.cluster }}-
+          UNIT_SKIP: ^rendered-${{ inputs.cluster }}-diff-
+          KUBERNETES_VERSION: ${{ inputs.kubernetes-version }}
+          POLICY: ${{ inputs.manifest-check-policy }}
+          REQUIRED_PLATFORMS: ${{ inputs.required-platforms }}
+          FAIL_ON_UNVERIFIABLE: ${{ inputs.manifest-check-fail-on-unverifiable }}
+          TITLE: ${{ inputs.group }} · ${{ inputs.cluster }}
+          OUT_DIR: ${{ runner.temp }}/kustomize-check
+          GHCR_TOKEN: ${{ github.token }}
+          GCP_ACCESS_TOKEN: ${{ secrets.GCP_ACCESS_TOKEN }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.PLATFORM_DIR}/actions/kubernetes/manifest-check/check.ts`);
+            await run({ core, exec, github, context });
+
+      - name: 💬 sticky PR comment
+        if: always() && inputs.sticky-comment && github.event_name == 'pull_request' && steps.check.outputs.report != ''
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          REPORT_MD: ${{ steps.check.outputs.report }}
+          COMMENT_KEY: ${{ inputs.cluster }}-${{ inputs.group }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.PLATFORM_DIR}/actions/kubernetes/manifest-check/comment.ts`);
+            await run({ core, exec, github, context });
+
   # mode=diff → "🔍 diff <app>", mode=refresh → "♻️ refresh <app>". One job (not two
   # skipped-by-mode jobs) so the Checks UI never shows an unexpanded matrix name. After a
-  # merge the job runs in the GitHub Environment <cluster>-<group>.
+  # merge the job runs in the GitHub Environment <cluster>-<group>. mode=diff waits for the
+  # 🧪 kustomize check and does not run when it failed (skipped = not applicable → runs).
   act:
     name: ${{ inputs.mode == 'diff' && '🔍 diff' || '♻️ refresh' }} ${{ matrix.app }}
-    needs: [discover, render]
-    if: always() && needs.discover.result == 'success'
+    needs: [discover, render, check]
+    if: always() && needs.discover.result == 'success' && needs.check.result != 'failure' && needs.check.result != 'cancelled'
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.mode == 'refresh' && (inputs.environment-name || format('{0}-{1}', inputs.cluster, inputs.group)) || inputs.pr-environment }}
@@ -614,7 +718,7 @@ jobs:
 
   result:
     name: 📋 result
-    needs: [discover, render, act]
+    needs: [discover, render, check, act]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -649,8 +753,9 @@ jobs:
         env:
           RENDER_RESULT: ${{ needs.render.result }}
           ACT_RESULT: ${{ needs.act.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
         run: |
-          { cat out/comment.md; echo; echo "<sub>render: $RENDER_RESULT · ${{ inputs.mode }}: $ACT_RESULT</sub>"; } >> "$GITHUB_STEP_SUMMARY"
+          { cat out/comment.md; echo; echo "<sub>render: $RENDER_RESULT · kustomize check: $CHECK_RESULT · ${{ inputs.mode }}: $ACT_RESULT</sub>"; } >> "$GITHUB_STEP_SUMMARY"
           cp out/group.json "out/group-${{ inputs.cluster }}-${{ inputs.group }}.json"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
