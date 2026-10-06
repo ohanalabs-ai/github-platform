@@ -224,7 +224,7 @@ export default async function run({ core, exec }: Ctx): Promise<void> {
   writeFileSync(join(outDir, "result.json"), JSON.stringify(result, null, 2));
   await core.summary.addRaw(report, true).write();
   core.setOutput("report", join(outDir, "report.md"));
-  core.setOutput("result", join(outDir, "result.json"));
+  core.setOutput("result-json", join(outDir, "result.json")); // not "result": github-script owns that output (the script's return value)
   core.setOutput("errors", errors.length);
   core.setOutput("warnings", findings.filter((x) => x.level === "warning").length);
   for (const x of findings) {

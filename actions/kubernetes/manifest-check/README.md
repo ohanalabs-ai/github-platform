@@ -52,7 +52,7 @@ packages and private ones that granted the repository access in the package sett
 `KUBERNETES_VERSION` (`1.35.0`) · `POLICY` (`enforce` | `warn`) · `REQUIRED_PLATFORMS` ·
 `REQUIRE_DIGEST` · `FAIL_ON_FLOATING` · `FAIL_ON_UNVERIFIABLE` · `CHECK_IMAGES` ·
 `ALL_KUSTOMIZATIONS` · `KUSTOMIZE_BUILD_ARGS` (`--enable-helm`) · `SKIP_KINDS` · `SCHEMA_LOCATIONS` ·
-`KUBECONFORM_STRICT` · `TITLE` · `RUN_URL` · `OUT_DIR`. Outputs: `report`, `result`, `errors`, `warnings`.
+`KUBECONFORM_STRICT` · `TITLE` · `RUN_URL` · `OUT_DIR`. Outputs: `report`, `result-json`, `errors`, `warnings`.
 
 ## Local run
 
