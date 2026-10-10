@@ -1,0 +1,159 @@
+# 🔏 docker/vault-sign — sign + attest an image DIGEST with the org's Vault Transit key
+# (cosign `hashivault://<key>`), no transparency log, provenance from the job's OIDC claims, and a
+# round-trip verification with the exported public key. Used by the ref/release build jobs of
+# .github/workflows/docker-multiarch-cicd.yaml (attestation-mode: vault). See README.md.
+#
+# Flow: plan.ts (sign? never on pull_request; only signing-refs) → [tailnet join] → hashicorp/vault-action
+# (method jwt, GitHub OIDC; token kept as a step OUTPUT, never exported to the job env) → cosign →
+# SBOM (Syft) → sign.ts (cosign sign --recursive + attest slsaprovenance1 + spdxjson, verify, revoke token).
+name: docker-vault-sign
+description: "Sign + attest an image digest with a Vault Transit key (cosign hashivault://), no Rekor, SLSA v1 provenance from the OIDC claims"
+inputs:
+  subject:
+    description: "<image>@sha256:<digest> to sign"
+    required: true
+  vault-url:
+    description: "Vault address (e.g. https://vault.platform.planeo.dev — tailnet-only: set join-tailscale)"
+    required: true
+  vault-auth-path:
+    description: "JWT auth mount bound to GitHub's OIDC issuer"
+    required: false
+    default: github-jwt
+  vault-role:
+    description: "JWT role (bound to repository + ref; carries the ci-image-signer-<org> policy)"
+    required: true
+  vault-jwt-audience:
+    description: "aud of the GitHub OIDC token — must be in the role's bound_audiences"
+    required: false
+    default: ""
+  vault-ca-cert:
+    description: "Optional base64 PEM CA bundle for a Vault behind a private CA"
+    required: false
+    default: ""
+  transit-key:
+    description: "Transit key name (one per org: <org>-ci-images)"
+    required: true
+  transit-path:
+    description: "Transit mount path"
+    required: false
+    default: transit
+  signing-refs:
+    description: "Refs allowed to sign (comma/newline; exact or trailing-* prefix). Never pull_request events."
+    required: false
+    default: "refs/heads/main,refs/heads/develop"
+  signer-workflow:
+    description: "The reusable workflow expected as builder (owner/repo/.github/workflows/<file>)"
+    required: false
+    default: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml
+  sbom:
+    description: "Also generate (Syft) and attest an SPDX SBOM"
+    required: false
+    default: "true"
+  join-tailscale:
+    description: "Join the tailnet before the Vault login (Vault is tailnet-only)"
+    required: false
+    default: "false"
+  tailscale-tags:
+    required: false
+    default: tag:ci
+  tailscale-args:
+    required: false
+    default: --accept-routes
+  ts-oauth-client-id:
+    required: false
+    default: ""
+  ts-oauth-secret:
+    required: false
+    default: ""
+outputs:
+  signed:
+    description: "true when the digest was signed + attested and the round trip verified"
+    value: ${{ steps.sign.outputs.signed || 'false' }}
+  reason:
+    description: "Why the run signed or did not"
+    value: ${{ steps.plan.outputs.reason }}
+  key-ref:
+    description: "hashivault://<transit-key>"
+    value: ${{ steps.sign.outputs.key-ref }}
+  public-key-b64:
+    description: "The Transit key's PUBLIC half (base64 PEM) — for verification without Vault"
+    value: ${{ steps.sign.outputs.public-key-b64 }}
+  builder-id:
+    description: "runDetails.builder.id of the provenance (the reusable workflow @ ref)"
+    value: ${{ steps.sign.outputs.builder-id }}
+runs:
+  using: composite
+  steps:
+    - name: 🔐 plan (sign this run?)
+      id: plan
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        # github.action_path, not $GITHUB_ACTION_PATH: inside a `uses:` step the env var is that action's path
+        HELPERS: ${{ github.action_path }}
+        EVENT_NAME: ${{ github.event_name }}
+        REF: ${{ github.ref }}
+        SIGNING_REFS: ${{ inputs.signing-refs }}
+        VAULT_URL: ${{ inputs.vault-url }}
+        VAULT_ROLE: ${{ inputs.vault-role }}
+        TRANSIT_KEY: ${{ inputs.transit-key }}
+        VAULT_CA_CERT: ${{ inputs.vault-ca-cert }}
+      with:
+        script: |
+          const { default: run } = await import(`${process.env.HELPERS}/plan.ts`);
+          await run({ core, exec, github, context });
+
+    - name: 🌐 join the tailnet (Vault is tailnet-only)
+      if: steps.plan.outputs.sign == 'true' && inputs.join-tailscale == 'true'
+      uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+      with:
+        oauth-client-id: ${{ inputs.ts-oauth-client-id }}
+        oauth-secret: ${{ inputs.ts-oauth-secret }}
+        tags: ${{ inputs.tailscale-tags }}
+        args: ${{ inputs.tailscale-args }}
+
+    - name: 🔑 Vault login (GitHub OIDC → JWT role)
+      id: vault
+      if: steps.plan.outputs.sign == 'true'
+      uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+      with:
+        url: ${{ inputs.vault-url }}
+        method: jwt
+        path: ${{ inputs.vault-auth-path }}
+        role: ${{ inputs.vault-role }}
+        jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+        caCertificate: ${{ inputs.vault-ca-cert }}
+        exportToken: false
+        outputToken: true
+
+    - name: 🧰 install cosign
+      if: steps.plan.outputs.sign == 'true'
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: 📦 SBOM (Syft, SPDX JSON)
+      if: steps.plan.outputs.sign == 'true' && inputs.sbom == 'true'
+      uses: anchore/sbom-action@f5e124a5e5e1d497a692818ae907d3c45829d033 # v0.17.3
+      with:
+        image: ${{ inputs.subject }}
+        output-file: ${{ runner.temp }}/vault-sign-sbom.spdx.json
+        upload-artifact: false
+
+    - name: 🔏 sign + attest (Vault Transit, no Rekor) and verify the round trip
+      id: sign
+      if: steps.plan.outputs.sign == 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        HELPERS: ${{ github.action_path }}
+        SUBJECT: ${{ inputs.subject }}
+        TRANSIT_KEY: ${{ inputs.transit-key }}
+        TRANSIT_PATH: ${{ inputs.transit-path }}
+        VAULT_ADDR: ${{ inputs.vault-url }}
+        VAULT_TOKEN: ${{ steps.vault.outputs.vault_token }}
+        VAULT_CACERT: ${{ steps.plan.outputs.ca-file }}
+        SBOM_FILE: ${{ inputs.sbom == 'true' && format('{0}/vault-sign-sbom.spdx.json', runner.temp) || '' }}
+        SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
+        OIDC_AUDIENCE: ${{ inputs.vault-jwt-audience }}
+        ORG: ${{ github.repository_owner }}
+      with:
+        script: |
+          const { default: run } = await import(`${process.env.HELPERS}/sign.ts`);
+          await run({ core, exec, github, context });

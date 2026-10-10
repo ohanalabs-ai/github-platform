@@ -3,16 +3,30 @@
 # Build provenance (see the attestation-mode input + ATTEST_MODE env below):
 #   * PUBLIC caller repos  -> GitHub Artifact Attestations (actions/attest-build-provenance,
 #     pushed to the registry; consumers verify with `gh attestation verify`).
-#   * PRIVATE caller repos -> cosign keyless (Sigstore): `cosign sign` + `cosign attest
-#     --type slsaprovenance1` with this workflow's OIDC identity; consumers verify with
-#     `cosign verify --certificate-identity-regexp '^https://github.com/<signer-workflow>@'
-#     --certificate-oidc-issuer https://token.actions.githubusercontent.com`.
-#     Why: GitHub Artifact Attestations on private repositories exist only on GitHub
-#     Enterprise Cloud — there is NO org-level toggle to enable; a private repo just gets
-#     HTTP 404 from the attestations API (ohanalabs-ai/vault-mcp-server run 35250882375),
-#     while the same pipeline passes on a public repo (marcellodesales/mcp-brasil run
-#     35491108003). The 🛡️ slsa job therefore verifies whichever mechanism applied and
-#     never 404s by design.
+#   * PRIVATE caller repos with `vault-url` + `transit-key` -> `vault` (the default for them,
+#     INTEGRATE-29): our OWN key signs. The ref/release build job (never a pull_request run)
+#     logs into Vault with its GitHub OIDC token (hashicorp/vault-action, JWT role bound to
+#     repository + ref — the role carries ci-image-signer-<org>), then cosign signs
+#     (`cosign sign --recursive`) and attests (`--type slsaprovenance1` + `spdxjson`) the DIGEST
+#     with `--key hashivault://<org>-ci-images`, NO transparency log. The provenance is built by
+#     actions/docker/vault-sign/provenance.ts from the OIDC claims: builder.id = the claim
+#     `job_workflow_ref` (THIS reusable @ the ref the caller pinned), externalParameters.workflow
+#     = {repository, ref, path} of the caller — the shape the clusters' ClusterImagePolicy CUE
+#     asserts (planeo-infra clusters/base/hooks/policy). The build job verifies the round trip
+#     with the exported public key; the 🛡️ slsa job re-verifies with no Vault access at all.
+#     Vault is tailnet-only for planeodev/ohanalabs-ai: set join-tailscale + pass the
+#     TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET secrets explicitly.
+#   * PRIVATE caller repos without Vault inputs -> `none` (❕ not attested, informational).
+#   * `cosign` (keyless Sigstore, Fulcio + the PUBLIC Rekor log) is an EXPLICIT opt-in only:
+#     it publishes the private repository's name, workflow and digests to the public
+#     transparency log. Consumers verify with `cosign verify --certificate-identity-regexp
+#     '^https://github.com/<signer-workflow>@' --certificate-oidc-issuer
+#     https://token.actions.githubusercontent.com`.
+#     Why not GitHub attestations for private repos: they exist only on GitHub Enterprise
+#     Cloud — there is NO org-level toggle; a private repo just gets HTTP 404 from the
+#     attestations API (ohanalabs-ai/vault-mcp-server run 35250882375), while the same pipeline
+#     passes on a public repo (marcellodesales/mcp-brasil run 35491108003). The 🛡️ slsa job
+#     verifies whichever mechanism applied and never 404s by design.
 on:
   workflow_call:
     inputs:
@@ -85,13 +99,82 @@ on:
         description: >-
           How the image digest gets verifiable build provenance.
           auto (default): public repo -> GitHub attestations (gh attestation verify);
-          private repo -> cosign keyless (Sigstore, cosign verify), because GitHub
-          Artifact Attestations for private repos require GitHub Enterprise Cloud.
-          github: force GitHub attestations. cosign: force cosign keyless.
+          private repo with vault-url + transit-key -> vault; private repo without them -> none
+          (GitHub Artifact Attestations for private repos require GitHub Enterprise Cloud).
+          github: force GitHub attestations.
+          vault: sign + attest with our Vault Transit key (cosign hashivault://, no Rekor) in the
+          ref/release build job only — never on pull_request events, only on vault-signing-refs.
+          cosign: EXPLICIT opt-in to Sigstore keyless — writes the repo/workflow/digest to the
+          PUBLIC Rekor transparency log; never the default.
           none: skip provenance (the slsa job reports "not attested" and does not fail).
         required: false
         type: string
         default: auto
+      vault-url:
+        description: >-
+          Vault address for attestation-mode vault (e.g. https://vault.platform.planeo.dev —
+          tailnet-only: also set join-tailscale). Empty = no Vault signing.
+        required: false
+        type: string
+        default: ""
+      vault-auth-path:
+        description: Mount path of Vault's JWT auth method bound to GitHub's OIDC issuer.
+        required: false
+        type: string
+        default: github-jwt
+      vault-role:
+        description: >-
+          Vault JWT role the build job logs in as — bound to repository + ref and carrying the
+          ci-image-signer-<org> policy, e.g. gha-<repo>-<branch> (callers pass a format() of github.ref_name). A ref without a
+          role is simply not in vault-signing-refs.
+        required: false
+        type: string
+        default: ""
+      vault-jwt-audience:
+        description: "`aud` of the GitHub OIDC token — must be in the role's bound_audiences."
+        required: false
+        type: string
+        default: https://github.com/${{ github.repository_owner }}
+      vault-ca-cert:
+        description: Optional base64-encoded PEM CA bundle when Vault's TLS is a private CA (empty = public CAs).
+        required: false
+        type: string
+        default: ""
+      transit-key:
+        description: Vault Transit signing key, one per org (planeodev-ci-images, ohanalabs-ai-ci-images).
+        required: false
+        type: string
+        default: ""
+      transit-path:
+        description: Vault Transit mount path.
+        required: false
+        type: string
+        default: transit
+      vault-signing-refs:
+        description: >-
+          Refs whose build signs (comma/newline; exact, or a trailing-* prefix such as refs/tags/v*).
+          Default = the refs the admission CUE accepts and the per-repo Vault roles are bound to.
+          pull_request events never sign, whatever this says.
+        required: false
+        type: string
+        default: refs/heads/main,refs/heads/develop
+      join-tailscale:
+        description: >-
+          Join the runner to the tailnet before the Vault login (vault mode only) — Vault is
+          reachable only through the Tailscale subnet router. Needs the TS_OAUTH_* secrets.
+        required: false
+        type: boolean
+        default: false
+      tailscale-tags:
+        description: ACL tags of the ephemeral CI node.
+        required: false
+        type: string
+        default: tag:ci
+      tailscale-args:
+        description: Extra `tailscale up` flags.
+        required: false
+        type: string
+        default: --accept-routes
       dockerhub-registry-username:
         description: Optional Docker Hub registry username to publish images.
         required: false
@@ -114,6 +197,15 @@ on:
         type: string
         default: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml
 
+    secrets:
+      TS_OAUTH_CLIENT_ID:
+        description: >-
+          Tailscale OAuth client (tags in tailscale-tags) — only read when join-tailscale is true.
+          Pass explicitly (`secrets: { TS_OAUTH_CLIENT_ID: … }`): `secrets: inherit` does not deliver
+          a caller org's selected-repository secrets to a workflow hosted in another org.
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
 
     outputs:
       image_tag:
@@ -138,6 +230,14 @@ on:
       image_digest:
         description: Digest (sha256:…) of the image this run built (PR, ref or release build). Empty when nothing was built.
         value: ${{ jobs.pr-build.outputs.image_digest || jobs.ref-build.outputs.image_digest || jobs.release-build.outputs.image_digest }}
+      signed:
+        description: >-
+          "true" when this run signed + attested the digest with the Vault Transit key (attestation-mode
+          vault) and verified the round trip; "false" otherwise (PR runs, non-signing refs, other modes).
+        value: ${{ jobs.ref-build.outputs.vault_signed == 'true' && 'true' || (jobs.release-build.outputs.vault_signed == 'true' && 'true' || 'false') }}
+      signature_key_ref:
+        description: The key the digest was signed with (hashivault://<transit-key>); empty when not signed.
+        value: ${{ jobs.ref-build.outputs.vault_key_ref || jobs.release-build.outputs.vault_key_ref }}
 
 # Set of permissions needed by the workflow
 permissions:
@@ -163,14 +263,18 @@ env:
   #             `gh attestation verify`. Needs GitHub Artifact Attestations: public repos have
   #             it; PRIVATE repos only get it on GitHub Enterprise Cloud (no org toggle exists —
   #             a private repo simply gets HTTP 404 from the attestations API).
-  #   cosign -> Sigstore keyless: `cosign sign` + `cosign attest --type slsaprovenance1` on the
-  #             digest with this reusable workflow's OIDC identity; verified with `cosign verify`.
-  #             Works for private repos on any GitHub plan. Chosen automatically for private repos.
-  #   none   -> no provenance; the 🛡️ slsa job reports it and does not fail.
+  #   vault  -> our Vault Transit key: cosign sign + attest (slsaprovenance1, spdxjson) with
+  #             --key hashivault://<transit-key>, no Rekor, in the ref/release build job only
+  #             (actions/docker/vault-sign). Chosen automatically for private repos that pass
+  #             vault-url + transit-key.
+  #   cosign -> Sigstore keyless (Fulcio + PUBLIC Rekor). Explicit opt-in only — it publishes the
+  #             private repo's identity to the public transparency log.
+  #   none   -> no provenance; the 🛡️ slsa job reports it and does not fail. The auto default for
+  #             a private repo without Vault inputs.
   # push-attestations "true" is the legacy override that forces `github` regardless of visibility.
-  ATTEST_MODE: ${{ inputs.attestation-mode != '' && inputs.attestation-mode != 'auto' && inputs.attestation-mode || (inputs.push-attestations == 'true' && 'github') || (github.event.repository.visibility == 'private' && 'cosign') || 'github' }}
-  # Derived: GitHub-native attestations are produced (and pushed) only in github mode.
-  PUSH_ATTESTATIONS: ${{ (inputs.attestation-mode == 'github' || (inputs.attestation-mode != 'cosign' && inputs.attestation-mode != 'none' && (inputs.push-attestations == 'true' || github.event.repository.visibility != 'private'))) && 'true' || 'false' }}
+  ATTEST_MODE: ${{ inputs.attestation-mode != '' && inputs.attestation-mode != 'auto' && inputs.attestation-mode || (inputs.push-attestations == 'true' && 'github') || (github.event.repository.visibility != 'private' && 'github') || (inputs.vault-url != '' && inputs.transit-key != '' && 'vault') || 'none' }}
+  # Derived: GitHub-native attestations are produced (and pushed) only in github mode (= ATTEST_MODE == 'github').
+  PUSH_ATTESTATIONS: ${{ (inputs.attestation-mode == 'github' || ((inputs.attestation-mode == '' || inputs.attestation-mode == 'auto') && (inputs.push-attestations == 'true' || github.event.repository.visibility != 'private'))) && 'true' || 'false' }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -390,7 +494,7 @@ jobs:
           push-to-registry: ${{ env.PUSH_ATTESTATIONS }}
           show-summary: true
 
-      - name: Install cosign (private repo → Sigstore keyless provenance)
+      - name: Install cosign (explicit keyless opt-in → public Sigstore)
         if: env.ATTEST_MODE == 'cosign'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
@@ -402,7 +506,7 @@ jobs:
           output-file: sbom-pr-cosign.spdx.json
           upload-artifact: false
 
-      - name: Sign + attest SLSA provenance with cosign (keyless)
+      - name: Sign + attest SLSA provenance with cosign (keyless — writes to the PUBLIC Rekor log)
         if: env.ATTEST_MODE == 'cosign'
         shell: bash
         env:
@@ -596,6 +700,10 @@ jobs:
       pr_number: ${{ steps.build_vars.outputs.pr_number }}
       comment_enabled: ${{ steps.build_vars.outputs.comment_enabled }}
       image_suffix: ${{ steps.build_vars.outputs.image_suffix }}
+      vault_signed: ${{ steps.vault_sign.outputs.signed }}
+      vault_reason: ${{ steps.vault_sign.outputs.reason }}
+      vault_key_ref: ${{ steps.vault_sign.outputs.key-ref }}
+      vault_public_key_b64: ${{ steps.vault_sign.outputs.public-key-b64 }}
     steps:
       - name: Checkout effective branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -731,7 +839,40 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-ref.spdx.json
 
-      - name: Install cosign (private repo → Sigstore keyless provenance)
+      # ── attestation-mode vault: our Transit key signs (actions/docker/vault-sign) ──────────────
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        if: env.ATTEST_MODE == 'vault'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .vault-sign
+          sparse-checkout: actions/docker/vault-sign
+          persist-credentials: false
+
+      - name: 🔏 Sign + attest with the org's Vault Transit key (no Rekor)
+        id: vault_sign
+        # Never a pull_request run: plan.ts refuses too, and the Vault role binds ref.
+        if: env.ATTEST_MODE == 'vault' && github.event_name != 'pull_request'
+        uses: ./.vault-sign/actions/docker/vault-sign
+        with:
+          subject: ${{ steps.ref_build.outputs.image-base }}@${{ steps.ref_build.outputs.digest }}
+          vault-url: ${{ inputs.vault-url }}
+          vault-auth-path: ${{ inputs.vault-auth-path }}
+          vault-role: ${{ inputs.vault-role }}
+          vault-jwt-audience: ${{ inputs.vault-jwt-audience }}
+          vault-ca-cert: ${{ inputs.vault-ca-cert }}
+          transit-key: ${{ inputs.transit-key }}
+          transit-path: ${{ inputs.transit-path }}
+          signing-refs: ${{ inputs.vault-signing-refs }}
+          signer-workflow: ${{ inputs.slsa-signer-workflow }}
+          join-tailscale: ${{ inputs.join-tailscale }}
+          tailscale-tags: ${{ inputs.tailscale-tags }}
+          tailscale-args: ${{ inputs.tailscale-args }}
+          ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+
+      - name: Install cosign (explicit keyless opt-in → public Sigstore)
         if: env.ATTEST_MODE == 'cosign'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
@@ -743,7 +884,7 @@ jobs:
           output-file: sbom-ref-cosign.spdx.json
           upload-artifact: false
 
-      - name: Sign + attest SLSA provenance with cosign (keyless)
+      - name: Sign + attest SLSA provenance with cosign (keyless — writes to the PUBLIC Rekor log)
         if: env.ATTEST_MODE == 'cosign'
         shell: bash
         env:
@@ -832,6 +973,10 @@ jobs:
       image_ref: ${{ steps.release_ref_build.outputs.digest && format('{0}@{1}', steps.release_ref_build.outputs.image-base, steps.release_ref_build.outputs.digest) || '' }}
       image_subject: ${{ steps.release_ref_build.outputs.subject }}
       report_title: SLSA verification (release build)
+      vault_signed: ${{ steps.vault_sign.outputs.signed }}
+      vault_reason: ${{ steps.vault_sign.outputs.reason }}
+      vault_key_ref: ${{ steps.vault_sign.outputs.key-ref }}
+      vault_public_key_b64: ${{ steps.vault_sign.outputs.public-key-b64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -926,7 +1071,40 @@ jobs:
           sbom-file: sbom-tag.spdx.json
           push-latest: true
 
-      - name: Install cosign (private repo → Sigstore keyless provenance)
+      # ── attestation-mode vault: our Transit key signs (actions/docker/vault-sign) ──────────────
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        if: env.ATTEST_MODE == 'vault'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .vault-sign
+          sparse-checkout: actions/docker/vault-sign
+          persist-credentials: false
+
+      - name: 🔏 Sign + attest with the org's Vault Transit key (no Rekor)
+        id: vault_sign
+        # Never a pull_request run: plan.ts refuses too, and the Vault role binds ref.
+        if: env.ATTEST_MODE == 'vault' && github.event_name != 'pull_request'
+        uses: ./.vault-sign/actions/docker/vault-sign
+        with:
+          subject: ${{ steps.release_ref_build.outputs.image-base }}@${{ steps.release_ref_build.outputs.digest }}
+          vault-url: ${{ inputs.vault-url }}
+          vault-auth-path: ${{ inputs.vault-auth-path }}
+          vault-role: ${{ inputs.vault-role }}
+          vault-jwt-audience: ${{ inputs.vault-jwt-audience }}
+          vault-ca-cert: ${{ inputs.vault-ca-cert }}
+          transit-key: ${{ inputs.transit-key }}
+          transit-path: ${{ inputs.transit-path }}
+          signing-refs: ${{ inputs.vault-signing-refs }}
+          signer-workflow: ${{ inputs.slsa-signer-workflow }}
+          join-tailscale: ${{ inputs.join-tailscale }}
+          tailscale-tags: ${{ inputs.tailscale-tags }}
+          tailscale-args: ${{ inputs.tailscale-args }}
+          ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+
+      - name: Install cosign (explicit keyless opt-in → public Sigstore)
         if: env.ATTEST_MODE == 'cosign'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
@@ -938,7 +1116,7 @@ jobs:
           output-file: sbom-tag-cosign.spdx.json
           upload-artifact: false
 
-      - name: Sign + attest SLSA provenance with cosign (keyless)
+      - name: Sign + attest SLSA provenance with cosign (keyless — writes to the PUBLIC Rekor log)
         if: env.ATTEST_MODE == 'cosign'
         shell: bash
         env:
@@ -1252,6 +1430,7 @@ jobs:
       #   missing GitHub attestation is informational (❕) or a failure (❌).
       - name: Verify SLSA provenance
         id: report
+        if: env.ATTEST_MODE != 'vault'
         uses: ohanalabs-ai/actions/docker/slsa-report@main
         with:
           subject: ${{ steps.report_vars.outputs.subject }}
@@ -1266,17 +1445,54 @@ jobs:
           cosign-identity-regexp: ${{ env.ATTEST_MODE != 'github' && format('^https://github.com/{0}@', inputs.slsa-signer-workflow) || '' }}
           fail-on-unverified: "true"
 
+      # attestation-mode vault: re-verify in THIS job, which has no Vault access — only the PUBLIC
+      # key the build exported + the registry. Same checks as admission (signature, SLSA provenance,
+      # the org's approved-build CUE). Emits the slsa-report outputs, so the steps below are shared.
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        if: env.ATTEST_MODE == 'vault'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .vault-sign
+          sparse-checkout: actions/docker/vault-sign
+          persist-credentials: false
+
+      - name: Install cosign (vault verification)
+        if: env.ATTEST_MODE == 'vault'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: 🛡️ Verify the Vault Transit signature + provenance (public key only)
+        id: report_vault
+        if: env.ATTEST_MODE == 'vault'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SUBJECT: ${{ steps.report_vars.outputs.subject }}
+          SIGNED: ${{ steps.report_vars.outputs.build_type == 'release' && needs['release-build'].outputs.vault_signed || needs['ref-build'].outputs.vault_signed }}
+          SIGN_REASON: ${{ steps.report_vars.outputs.build_type == 'release' && needs['release-build'].outputs.vault_reason || needs['ref-build'].outputs.vault_reason }}
+          KEY_REF: ${{ steps.report_vars.outputs.build_type == 'release' && needs['release-build'].outputs.vault_key_ref || needs['ref-build'].outputs.vault_key_ref }}
+          PUBLIC_KEY_B64: ${{ steps.report_vars.outputs.build_type == 'release' && needs['release-build'].outputs.vault_public_key_b64 || needs['ref-build'].outputs.vault_public_key_b64 }}
+          ORG: ${{ github.repository_owner }}
+          SIGNER_WORKFLOW: ${{ inputs.slsa-signer-workflow }}
+          SLSA_BUILD_LEVEL: ${{ inputs.slsa-build-level }}
+          TITLE: ${{ steps.report_vars.outputs.title }}
+          FAIL_ON_UNVERIFIED: "true"
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.vault-sign/actions/docker/vault-sign/verify.ts`);
+            await run({ core, exec, github, context });
+
       - name: Summarize verification result
         shell: bash
         env:
           BUILD_TYPE: ${{ steps.report_vars.outputs.build_type }}
           REF_NAME: ${{ steps.report_vars.outputs.ref_name }}
           SUBJECT: ${{ steps.report_vars.outputs.subject }}
-          MODE: ${{ steps.report.outputs.attested_by }}
-          STATUS: ${{ steps.report.outputs.status }}
-          VERIFIED: ${{ steps.report.outputs.verified }}
-          DECLARED_SLSA_BUILD_LEVEL: ${{ steps.report.outputs.declared_slsa_build_level }}
-          REPORT: ${{ steps.report.outputs.summary_markdown }}
+          MODE: ${{ steps.report.outputs.attested_by || steps.report_vault.outputs.attested_by }}
+          STATUS: ${{ steps.report.outputs.status || steps.report_vault.outputs.status }}
+          VERIFIED: ${{ steps.report.outputs.verified || steps.report_vault.outputs.verified }}
+          DECLARED_SLSA_BUILD_LEVEL: ${{ steps.report.outputs.declared_slsa_build_level || steps.report_vault.outputs.declared_slsa_build_level }}
+          REPORT: ${{ steps.report.outputs.summary_markdown || steps.report_vault.outputs.summary_markdown }}
         run: |
           set -euo pipefail
 
@@ -1313,10 +1529,10 @@ jobs:
           PR_NUMBER: ${{ needs['ref-build'].outputs.pr_number }}
           IMAGE_TAG: ${{ needs['ref-build'].outputs.image_tag }}
           IMAGE_SUFFIX: ${{ needs['ref-build'].outputs.image_suffix }}
-          VERIFIED: ${{ steps.report.outputs.verified }}
-          ATTESTED_BY: ${{ steps.report.outputs.attested_by }}
-          STATUS: ${{ steps.report.outputs.status }}
-          SLSA_REPORT: ${{ steps.report.outputs.summary_markdown }}
+          VERIFIED: ${{ steps.report.outputs.verified || steps.report_vault.outputs.verified }}
+          ATTESTED_BY: ${{ steps.report.outputs.attested_by || steps.report_vault.outputs.attested_by }}
+          STATUS: ${{ steps.report.outputs.status || steps.report_vault.outputs.status }}
+          SLSA_REPORT: ${{ steps.report.outputs.summary_markdown || steps.report_vault.outputs.summary_markdown }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -1404,7 +1620,7 @@ jobs:
       - name: Add SLSA report and publish GitHub release
         if: |
           steps.report_vars.outputs.build_type == 'release' &&
-          steps.report.outputs.verified == 'true'
+          (steps.report.outputs.verified || steps.report_vault.outputs.verified) == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           RELEASE_ID: ${{ needs['github-release'].outputs.release_id }}
@@ -1413,8 +1629,8 @@ jobs:
           IMAGE: ${{ steps.report_vars.outputs.image_base }}
           DIGEST: ${{ steps.report_vars.outputs.digest }}
           SUBJECT: ${{ steps.report_vars.outputs.subject }}
-          VERIFIED: ${{ steps.report.outputs.verified }}
-          SLSA_REPORT: ${{ steps.report.outputs.summary_markdown }}
+          VERIFIED: ${{ steps.report.outputs.verified || steps.report_vault.outputs.verified }}
+          SLSA_REPORT: ${{ steps.report.outputs.summary_markdown || steps.report_vault.outputs.summary_markdown }}
         with:
           script: |
             const { owner, repo } = context.repo;
