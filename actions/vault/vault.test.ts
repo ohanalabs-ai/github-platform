@@ -80,16 +80,16 @@ test("digestToB64 accepts sha256:<hex> and bare hex, rejects anything else", () 
 
 test("audience defaults to GitHub's default (the owner URL), input overrides", () => {
   assert.equal(audienceFor("", "https://github.com", "acme"), "https://github.com/acme");
-  assert.equal(audienceFor("https://planeo.dev/vault/acme", "https://github.com", "acme"), "https://planeo.dev/vault/acme");
+  assert.equal(audienceFor("https://vault.planeo.dev/acme", "https://github.com", "acme"), "https://vault.planeo.dev/acme");
 });
 
 test("login posts role+jwt unauthenticated to auth/<mount>/login; later calls carry the token", async () => {
   const { f, calls } = fakeVault({
-    "POST /v1/auth/github-acme/login": () => [200, LOGIN],
+    "POST /v1/auth/github/acme/login": () => [200, LOGIN],
     "GET /v1/transit/keys/customers-acme-prd-images": () => [200, KEY],
   });
   const v = new Vault("https://vault.example.com", f);
-  const r = await v.login("github-acme", "acme-prd-app-main", "JWT");
+  const r = await v.login("github/acme", "acme-prd-app-main", "JWT");
   assert.equal(r.ttl, 900);
   assert.deepEqual(calls[0].body, { role: "acme-prd-app-main", jwt: "JWT" });
   assert.equal(calls[0].headers["x-vault-token"], undefined);
@@ -97,7 +97,7 @@ test("login posts role+jwt unauthenticated to auth/<mount>/login; later calls ca
   assert.equal(pk.version, 2);
   assert.match(pk.pem, /BEGIN PUBLIC KEY/);
   assert.equal(calls[1].headers["x-vault-token"], "hvs.TEST");
-  await assert.rejects(v.login("github-acme", "a/b", "JWT"), /single name/);
+  await assert.rejects(v.login("github/acme", "a/b", "JWT"), /single name/);
 });
 
 test("errors surface Vault's message + a hint, never the request body", async () => {
@@ -172,12 +172,12 @@ test("sign (digest mode) end to end: login → key guard → sign → verify →
     "POST /v1/auth/token/revoke-self": () => [204, undefined],
   });
   const c = fakeCore();
-  await withEnv({ VAULT_URL: "https://vault.example.com", VAULT_AUTH_PATH: "github-jwt", VAULT_ROLE: "r", VAULT_AUDIENCE: "https://planeo.dev/vault/acme", KEY: "k", MODE: "digest", DIGEST: `sha256:${D}` }, () =>
+  await withEnv({ VAULT_URL: "https://vault.example.com", VAULT_AUTH_PATH: "github-jwt", VAULT_ROLE: "r", VAULT_AUDIENCE: "https://vault.planeo.dev/acme", KEY: "k", MODE: "digest", DIGEST: `sha256:${D}` }, () =>
     signRun({ core: c.core, exec: {} as any, github: {}, context: {} }, f));
   assert.equal(c.out.signature, "vault:v2:SIG");
   assert.equal(c.out["key-version"], "2");
   assert.ok(c.secrets.includes("hvs.TEST"));
-  assert.equal(calls[0].body.jwt, "jwt-for:https://planeo.dev/vault/acme");
+  assert.equal(calls[0].body.jwt, "jwt-for:https://vault.planeo.dev/acme");
   assert.equal(calls.at(-1)!.url.endsWith("/v1/auth/token/revoke-self"), true);
 });
 
