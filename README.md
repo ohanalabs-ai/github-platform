@@ -41,7 +41,7 @@ jobs:
       docker-compose-file-name: docker-compose.yaml
       dockerhub-registry: docker.io
       dockerhub-namespace: ${{ github.repository_owner }}
-      # attestation-mode: auto  # public repo → GitHub attestations, private repo → cosign keyless (see products/devsecops-docker)
+      # attestation-mode: auto  # public repo → GitHub attestations, private repo → vault (with vault-url + transit-key) else none (see products/devsecops-docker)
     secrets: inherit
 ```
 
@@ -53,5 +53,5 @@ jobs:
 - `docker-compose-file-name` (default: `docker-compose.yaml`)
 - `dockerhub-registry` (default: `docker.io`)
 - `dockerhub-namespace` (default: `${{ github.repository_owner }}`)
-- `attestation-mode` (default: `auto`) — public repo → GitHub attestations, private repo → cosign keyless; `github` / `cosign` / `none` to force
+- `attestation-mode` (default: `auto`) — public repo → GitHub attestations; private repo → `vault` (our Vault Transit key via `vault-url` + `vault-role` + `transit-key`, no Rekor) else `none`; `github` / `vault` / `cosign` (keyless — explicit opt-in, writes to the PUBLIC Rekor log) / `none` to force
 - `push-attestations` (default: `"false"`) — legacy override forcing GitHub attestations
