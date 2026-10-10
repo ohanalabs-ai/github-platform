@@ -25,7 +25,7 @@ on:
         type: string
         required: true
       vault-auth-path:
-        description: "JWT auth mount that trusts GitHub's OIDC issuer (Planeo tenants: github-<tenant>)"
+        description: "JWT auth mount that trusts GitHub's OIDC issuer (Planeo tenants: github/<tenant>)"
         type: string
         default: github-jwt
       vault-role:
@@ -41,11 +41,11 @@ on:
         type: string
         default: ""
       transit-path:
-        description: "Transit secrets engine mount"
+        description: "Transit secrets engine mount (Planeo tenants: transit-customers/<tenant>-<env>)"
         type: string
         default: transit
       key:
-        description: "Transit key name (Planeo tenants: customers-<tenant>-<env>-<name>)"
+        description: "Transit key name (Planeo tenants: a key of the transit-customers/<tenant>-<env> mount)"
         type: string
         required: true
       mode:

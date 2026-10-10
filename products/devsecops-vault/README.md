@@ -17,22 +17,23 @@ to GitHub callers — design and threat model:
 ## What the Vault side must have
 
 ```hcl
-# a JWT auth mount trusting GitHub's issuer (Planeo: one mount per tenant, auth/github-<tenant>)
-vault write auth/github-acme/config \
+# a JWT auth mount trusting GitHub's issuer (Planeo: one mount per tenant, auth/github/<tenant>)
+vault write auth/github/acme/config \
   oidc_discovery_url=https://token.actions.githubusercontent.com \
   bound_issuer=https://token.actions.githubusercontent.com
 
 # a role per repository × ref (or environment) — bind the NUMERIC ids (renames/resurrected names can't match)
-vault write auth/github-acme/role/acme-prd-app-main role_type=jwt \
-  bound_audiences=https://planeo.dev/vault/acme \
+vault write auth/github/acme/role/acme-prd-app-main role_type=jwt \
+  bound_audiences=https://vault.planeo.dev/acme \
   bound_claims_type=string \
   bound_claims='{"repository_owner_id":"1234567","repository_id":"7654321","ref":"refs/heads/main","event_name":["push","workflow_dispatch"]}' \
   user_claim=repository_id \
   claim_mappings='{"repository":"repository","ref":"ref","workflow_ref":"workflow_ref","run_id":"run_id"}' \
   token_policies=customers-acme-prd-signer token_ttl=15m token_max_ttl=15m
 
-# a non-exportable transit key; the signer policy grants transit/sign/<key>/* (update) + transit/keys/<key> (read) only
-vault write transit/keys/customers-acme-prd-images type=ecdsa-p256 exportable=false allow_plaintext_backup=false
+# a per-tenant-env transit mount + a non-exportable key; the signer policy grants <mount>/sign/<key>/* (update) + <mount>/keys/<key> (read) only
+vault secrets enable -path=transit-customers/acme-prd transit
+vault write transit-customers/acme-prd/keys/images type=ecdsa-p256 exportable=false allow_plaintext_backup=false
 ```
 
 ## Calling it
@@ -55,10 +56,11 @@ jobs:
     uses: ohanalabs-ai/github-platform/.github/workflows/vault-sign.yaml@main
     with:
       vault-url: https://vault.planeo.dev
-      vault-auth-path: github-acme
+      vault-auth-path: github/acme
       vault-role: acme-prd-app-main
-      vault-audience: https://planeo.dev/vault/acme
-      key: customers-acme-prd-images
+      vault-audience: https://vault.planeo.dev/acme
+      transit-path: transit-customers/acme-prd
+      key: images
       mode: cosign
       image: ghcr.io/acme/app@${{ needs.build.outputs.digest }}
       registry: ghcr.io
@@ -70,10 +72,11 @@ jobs:
     uses: ohanalabs-ai/github-platform/.github/workflows/vault-sign.yaml@main
     with:
       vault-url: https://vault.planeo.dev
-      vault-auth-path: github-acme
+      vault-auth-path: github/acme
       vault-role: acme-prd-app-main
-      vault-audience: https://planeo.dev/vault/acme
-      key: customers-acme-prd-artifacts
+      vault-audience: https://vault.planeo.dev/acme
+      transit-path: transit-customers/acme-prd
+      key: artifacts
       digest: sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 ```
 
@@ -91,9 +94,9 @@ jobs:
     uses: ohanalabs-ai/github-platform/.github/workflows/vault-rotate-secret.yaml@main
     with:
       vault-url: https://vault.planeo.dev
-      vault-auth-path: github-acme
+      vault-auth-path: github/acme
       vault-role: acme-prd-rotator-main   # bound to ref main + event_name schedule/workflow_dispatch
-      vault-audience: https://planeo.dev/vault/acme
+      vault-audience: https://vault.planeo.dev/acme
       kv-mount: planeo
       secret-path: customers/acme-prd/app/api-token
       field: token
