@@ -1,0 +1,194 @@
+# 🔏 vault-sign — "sign digest D (or image I@sha256:D) with key K at Vault V", for any GitHub repo whose
+# workflow can mint a GitHub OIDC token and whose Vault role trusts it. Vault-as-a-service for GitHub
+# callers (design: planeodev/planeo-infra docs/vault/github-actions-access.md, Jira INTEGRATE-30).
+#
+#   1. 🪪 CA        optional custom Vault CA (base64 PEM — the vionix `caCertificate` shape); a publicly
+#                   trusted Vault needs none
+#   2. 🔗 tailnet   optional: join a Tailscale tailnet first (Vault reachable only there — Planeo's own
+#                   repos at rollout gate 0)
+#   3. 🔏 sign      GitHub OIDC token (audience `vault-audience`) → POST auth/<vault-auth-path>/login role
+#                   <vault-role> → guard: the transit key must be non-exportable and refuse plaintext backup →
+#                     mode digest: transit/sign/<key>/sha2-256 (prehashed) + transit/verify  → `signature`
+#                     mode cosign: cosign sign --key hashivault://<key>, no tlog, + cosign verify → `signed-ref`
+#                   → revoke-self. The Vault token never leaves the step.
+#
+# All logic is TypeScript run by actions/github-script v8 (Node 24 type stripping, no npm):
+# actions/vault/{ca,install,sign,client}.ts. cosign is downloaded sha256-pinned (install.ts).
+# The caller's job needs `permissions: id-token: write` (and `packages: write` to push a cosign signature).
+name: 🔏 vault-sign
+
+on:
+  workflow_call:
+    inputs:
+      vault-url:
+        description: "Vault base URL, https:// (e.g. https://vault.planeo.dev)"
+        type: string
+        required: true
+      vault-auth-path:
+        description: "JWT auth mount that trusts GitHub's OIDC issuer (Planeo tenants: github-<tenant>)"
+        type: string
+        default: github-jwt
+      vault-role:
+        description: "Role on that mount (bound to this repository + ref/environment)"
+        type: string
+        required: true
+      vault-audience:
+        description: "OIDC audience the role's bound_audiences expects (default: GitHub's default, https://github.com/<owner>)"
+        type: string
+        default: ""
+      ca-certificate:
+        description: "Optional base64 PEM of the Vault server's CA (only for a privately-issued certificate)"
+        type: string
+        default: ""
+      transit-path:
+        description: "Transit secrets engine mount"
+        type: string
+        default: transit
+      key:
+        description: "Transit key name (Planeo tenants: customers-<tenant>-<env>-<name>)"
+        type: string
+        required: true
+      mode:
+        description: "digest (sign a SHA-256 digest, returns the Vault signature) | cosign (sign an OCI image, signature pushed to the registry)"
+        type: string
+        default: digest
+      digest:
+        description: "mode=digest: the SHA-256 to sign (sha256:<hex> or <hex>)"
+        type: string
+        default: ""
+      image:
+        description: "mode=cosign: the image, pinned by digest (<registry>/<repo>@sha256:<hex>)"
+        type: string
+        default: ""
+      registry:
+        description: "mode=cosign: registry to log in to before pushing the signature (empty: no login)"
+        type: string
+        default: ""
+      registry-username:
+        description: "mode=cosign: registry user (default x-access-token, i.e. GITHUB_TOKEN for ghcr.io)"
+        type: string
+        default: ""
+      verify:
+        description: "Verify the signature right after producing it"
+        type: boolean
+        default: true
+      require-non-exportable:
+        description: "Refuse to sign with an exportable / plaintext-backup-able key"
+        type: boolean
+        default: true
+      join-tailscale:
+        description: "Join a Tailscale tailnet before reaching Vault (private Vault)"
+        type: boolean
+        default: false
+      tailscale-tags:
+        description: "Tags for the ephemeral CI node"
+        type: string
+        default: tag:ci
+      runs-on:
+        description: "Runner label"
+        type: string
+        default: ubuntu-latest
+    secrets:
+      registry-password:
+        description: "mode=cosign: registry password/token (ghcr.io: pass GITHUB_TOKEN with packages: write)"
+        required: false
+      tailscale-oauth-client-id:
+        required: false
+      tailscale-oauth-secret:
+        required: false
+    outputs:
+      signature:
+        description: "mode=digest: vault:vN:<base64 ASN.1 signature>"
+        value: ${{ jobs.sign.outputs.signature }}
+      key-version:
+        description: "Transit key version that signed"
+        value: ${{ jobs.sign.outputs.key-version }}
+      public-key:
+        description: "Base64 of the key's latest public PEM (pin it in your verifier)"
+        value: ${{ jobs.sign.outputs.public-key }}
+      signed-ref:
+        description: "What was signed: sha256:<hex> (digest) or <image>@sha256:<hex> (cosign)"
+        value: ${{ jobs.sign.outputs.signed-ref }}
+      meter-event:
+        description: "CloudEvents JSON usage record (metering hook)"
+        value: ${{ jobs.sign.outputs.meter-event }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  sign:
+    name: 🔏 sign with ${{ inputs.key }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # job-level permissions REPLACE the workflow default — repeated for the OIDC token
+      packages: write # mode=cosign pushes the signature next to the image (ghcr.io)
+    outputs:
+      signature: ${{ steps.sign.outputs.signature }}
+      key-version: ${{ steps.sign.outputs.key-version }}
+      public-key: ${{ steps.sign.outputs.public-key }}
+      signed-ref: ${{ steps.sign.outputs.signed-ref }}
+      meter-event: ${{ steps.sign.outputs.meter-event }}
+    steps:
+      - name: 📥 vault actions (this workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .vault-actions
+          sparse-checkout: actions/vault
+          persist-credentials: false
+
+      - name: 🪪 custom Vault CA (optional)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CA_B64: ${{ inputs.ca-certificate }}
+          CA_FILE: ${{ runner.temp }}/vault-ca.pem
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.vault-actions/actions/vault/ca.ts`);
+            await run({ core, exec, github, context });
+
+      - name: 🔗 join the tailnet (private Vault)
+        if: inputs.join-tailscale
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.tailscale-oauth-client-id }}
+          oauth-secret: ${{ secrets.tailscale-oauth-secret }}
+          tags: ${{ inputs.tailscale-tags }}
+          args: --accept-routes
+
+      - name: 🧰 cosign (sha256-pinned)
+        if: inputs.mode == 'cosign'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.vault-actions/actions/vault/install.ts`);
+            await run({ core, exec, github, context });
+
+      - name: 🔏 login · key guard · sign · verify · revoke
+        id: sign
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          NODE_EXTRA_CA_CERTS: ${{ inputs.ca-certificate != '' && format('{0}/vault-ca.pem', runner.temp) || '' }}
+          VAULT_URL: ${{ inputs.vault-url }}
+          VAULT_AUTH_PATH: ${{ inputs.vault-auth-path }}
+          VAULT_ROLE: ${{ inputs.vault-role }}
+          VAULT_AUDIENCE: ${{ inputs.vault-audience }}
+          TRANSIT_PATH: ${{ inputs.transit-path }}
+          KEY: ${{ inputs.key }}
+          MODE: ${{ inputs.mode }}
+          DIGEST: ${{ inputs.digest }}
+          IMAGE: ${{ inputs.image }}
+          VERIFY: ${{ inputs.verify }}
+          REQUIRE_NON_EXPORTABLE: ${{ inputs.require-non-exportable }}
+          REGISTRY: ${{ inputs.registry }}
+          REGISTRY_USERNAME: ${{ inputs.registry-username }}
+          REGISTRY_PASSWORD: ${{ secrets.registry-password }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.vault-actions/actions/vault/sign.ts`);
+            await run({ core, exec, github, context });

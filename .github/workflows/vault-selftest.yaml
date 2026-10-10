@@ -1,0 +1,121 @@
+# 🧪 vault-selftest — the vault-sign / vault-rotate-secret modules against a REAL Vault (dev-mode service
+# container, a random root token per run) and REAL GitHub OIDC tokens — no Planeo infrastructure touched:
+#   setup     auth/github-selftest (jwt → GitHub's issuer), role selftest-ok bound to THIS repository_id +
+#             repository_owner_id + event_name + a per-run audience, a non-exportable ecdsa-p256 transit
+#             key, kv-v2 `selftest/`
+#   sign      sign.ts mode=digest: login → key guard → transit sign → transit verify → revoke
+#   rotate    rotate.ts twice: first rotation creates v1 (cas 0), second makes v2 (cas 1)
+#   negative  a role bound to ANOTHER repository_id must refuse this job's token (confused deputy)
+# The unit tests (node:test, no network) run in actions-typescript-selftest.yaml.
+# Fork PRs get no OIDC token (GitHub downgrades id-token: write to read) → the job is skipped for them.
+name: 🧪 vault-selftest
+run-name: "🧪 vault-selftest · ${{ github.event_name }} · ${{ github.ref_name }}"
+
+on:
+  pull_request:
+    paths:
+      - "actions/vault/**"
+      - ".github/workflows/vault-*.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "actions/vault/**"
+      - ".github/workflows/vault-*.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: 🧪 sign · rotate · confused-deputy (dev Vault + GitHub OIDC)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VAULT_URL: http://127.0.0.1:8200
+      VAULT_ALLOW_HTTP: "true" # dev server only; the reusables refuse http://
+      SELFTEST_AUD: https://github.com/${{ github.repository }}/vault-selftest/${{ github.run_id }}
+    services:
+      vault:
+        image: hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: selftest-${{ github.run_id }}-${{ github.run_attempt }}
+          VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+          SKIP_SETCAP: "true"
+        ports:
+          - 8200:8200
+        options: >-
+          --health-cmd "VAULT_ADDR=http://127.0.0.1:8200 vault status"
+          --health-interval 2s --health-timeout 2s --health-retries 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: 🧰 configure the dev Vault like a tenant
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          STEP: setup
+          VAULT_ROOT_TOKEN: selftest-${{ github.run_id }}-${{ github.run_attempt }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/actions/vault/selftest.ts`);
+            await run({ core, exec, github, context });
+
+      - name: 🔏 sign a digest (mode=digest)
+        id: sign
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          VAULT_AUTH_PATH: github-selftest
+          VAULT_ROLE: selftest-ok
+          VAULT_AUDIENCE: ${{ env.SELFTEST_AUD }}
+          KEY: selftest-images
+          MODE: digest
+        with:
+          script: |
+            // the thing signed: SHA-256 of the commit id (any 32-byte digest will do)
+            const { createHash } = await import('node:crypto');
+            process.env.DIGEST = 'sha256:' + createHash('sha256').update(process.env.GITHUB_SHA).digest('hex');
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/actions/vault/sign.ts`);
+            await run({ core, exec, github, context });
+
+      - name: ✅ the signature came back
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SIG: ${{ steps.sign.outputs.signature }}
+          PUB: ${{ steps.sign.outputs.public-key }}
+        with:
+          script: |
+            if (!/^vault:v1:/.test(process.env.SIG)) core.setFailed(`unexpected signature ${process.env.SIG}`);
+            if (!Buffer.from(process.env.PUB, 'base64').toString().includes('BEGIN PUBLIC KEY')) core.setFailed('no public key PEM');
+
+      - name: 🔄 rotate twice (create, then cas-update)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          VAULT_AUTH_PATH: github-selftest
+          VAULT_ROLE: selftest-ok
+          VAULT_AUDIENCE: ${{ env.SELFTEST_AUD }}
+          KV_MOUNT: selftest
+          SECRET_PATH: rotate/app-token
+          FIELD: token
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/actions/vault/rotate.ts`);
+            const outs = [];
+            const c = { ...core, setOutput: (k, v) => { if (k === 'version') outs.push(String(v)); core.setOutput(k, v); } };
+            await run({ core: c, exec, github, context });
+            await run({ core: c, exec, github, context });
+            if (outs.join(',') !== '1,2') core.setFailed(`expected versions 1,2 — got ${outs.join(',')}`);
+
+      - name: 🚫 another repository's role refuses this token
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          STEP: negative
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/actions/vault/selftest.ts`);
+            await run({ core, exec, github, context });
