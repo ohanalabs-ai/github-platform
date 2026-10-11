@@ -60,9 +60,18 @@ inputs:
     required: false
     default: --accept-routes
   ts-oauth-client-id:
+    description: >-
+      Tailscale trust-credential client id. With ts-audience = an OIDC federated identity
+      (workload identity federation: GitHub's OIDC token is exchanged, NO secret — the id and
+      audience are not secrets). Without ts-audience = a classic OAuth client + ts-oauth-secret.
+    required: false
+    default: ""
+  ts-audience:
+    description: "Audience of the Tailscale OIDC federated identity (set = no ts-oauth-secret needed)"
     required: false
     default: ""
   ts-oauth-secret:
+    description: "Classic OAuth client secret — only when ts-audience is empty (legacy)"
     required: false
     default: ""
 outputs:
@@ -102,12 +111,17 @@ runs:
           const { default: run } = await import(`${process.env.HELPERS}/plan.ts`);
           await run({ core, exec, github, context });
 
+    # Workload identity federation (ts-audience set): the action exchanges the job's GitHub OIDC
+    # token (id-token: write — already required for the Vault login) for a tag:ci auth key. The
+    # Tailscale side trusts the GitHub issuer + a subject pattern per org, so no secret exists
+    # anywhere in the signing path: tailnet join, Vault login and Transit signing are all OIDC.
     - name: 🌐 join the tailnet (Vault is tailnet-only)
       if: steps.plan.outputs.sign == 'true' && inputs.join-tailscale == 'true'
-      uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+      uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
       with:
         oauth-client-id: ${{ inputs.ts-oauth-client-id }}
-        oauth-secret: ${{ inputs.ts-oauth-secret }}
+        audience: ${{ inputs.ts-audience }}
+        oauth-secret: ${{ inputs.ts-audience == '' && inputs.ts-oauth-secret || '' }}
         tags: ${{ inputs.tailscale-tags }}
         args: ${{ inputs.tailscale-args }}
 

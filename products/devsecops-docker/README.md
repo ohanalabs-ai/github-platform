@@ -46,14 +46,20 @@ jobs:
     permissions: { contents: write, packages: write, id-token: write, attestations: write, artifact-metadata: write, pull-requests: write }
     with:
       docker-compose-file-name: docker-compose.yaml
-      vault-url: ${{ vars.VAULT_ADDR }}                         # https://vault.platform.planeo.dev
-      vault-role: gha-${{ github.event.repository.name }}-${{ github.ref_name }}   # bound to repository + ref
-      transit-key: ${{ github.repository_owner }}-ci-images      # planeodev-ci-images | ohanalabs-ai-ci-images
-      join-tailscale: true
-    secrets:
-      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+      vault-url: https://vault.platform.planeo.dev                # or an org variable
+      join-tailscale: true                                         # Vault is tailnet-only
+      tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }} # Tailscale OIDC federated identity — NOT a secret
+      tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}        # NOT a secret
+      # vault-role / transit-key default to gha-<org>-image-signer / <org>-ci-images (org-wide)
 ```
+
+**No secret anywhere in the signing path.** Every hop trades the job's GitHub OIDC token
+(`id-token: write`): Tailscale's federated identity (trusts `token.actions.githubusercontent.com`
++ a subject pattern for the org, tag `tag:ci`) issues an ephemeral node key; Vault's `github-jwt`
+role (bound to the org's numeric id, `main|develop`, `push|workflow_dispatch`) issues a 15-minute
+token carrying `ci-image-signer-<org>`; Transit signs. The client id and audience are identifiers,
+not credentials — they only work for a token GitHub minted for a run of this org. The legacy
+`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` secrets still work when `tailscale-audience` is empty.
 
 Always reference `@main` — this is an internal, org-owned workflow repo, so callers are expected to track the latest reviewed version rather than pin a SHA (unlike third-party actions, which this org's own `actions-pin-version-setting-lint.yaml` requires pinning).
 
@@ -76,19 +82,20 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `attestation-mode` | `auto` | How the image gets verifiable provenance: `auto` (public repo → GitHub attestations; private repo → `vault` when `vault-url` + `transit-key` are set, else `none`), `github`, `vault`, `cosign` (**explicit opt-in only — keyless Sigstore writes the private repo's name, workflow and digests to the PUBLIC Rekor transparency log**), `none` |
 | `vault-url` | `""` | Vault address for `vault` mode (tailnet-only for our orgs → also `join-tailscale`) |
 | `vault-auth-path` | `github-jwt` | Vault JWT auth mount bound to GitHub's OIDC issuer |
-| `vault-role` | `""` | JWT role the build job logs in as — bound to `repository` + `ref`, carrying `ci-image-signer-<org>` (convention `gha-<repo>-<branch>`) |
+| `vault-role` | `gha-<owner>-image-signer` | JWT role the build job logs in as, carrying `ci-image-signer-<org>` — the org-wide role (no per-repo role) |
 | `vault-jwt-audience` | `https://github.com/<owner>` | `aud` of the OIDC token; must be in the role's `bound_audiences` |
 | `vault-ca-cert` | `""` | Optional base64 PEM CA bundle for a Vault behind a private CA |
-| `transit-key` | `""` | Transit signing key, one per org: `planeodev-ci-images`, `ohanalabs-ai-ci-images` |
+| `transit-key` | `<owner>-ci-images` | Transit signing key, one per org: `planeodev-ci-images`, `ohanalabs-ai-ci-images` |
 | `transit-path` | `transit` | Transit mount path |
 | `vault-signing-refs` | `refs/heads/main,refs/heads/develop` | Refs whose build signs (exact or trailing-`*` prefix). `pull_request` events never sign. Tag releases sign only if you add e.g. `refs/tags/v*` **and** a Vault role bound to those refs |
-| `join-tailscale` | `false` | Join the tailnet before the Vault login (needs secrets `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`) |
+| `join-tailscale` | `false` | Join the tailnet before the Vault login (`tailscale/github-action` v4) |
+| `tailscale-oauth-client-id` / `tailscale-audience` | `""` | Tailscale OIDC federated identity (workload identity federation) — secretless join; not secrets. Empty audience = legacy secrets `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` |
 | `tailscale-tags` / `tailscale-args` | `tag:ci` / `--accept-routes` | Tailnet node tags / `tailscale up` flags |
 | `push-attestations` | `"false"` | Legacy override: `"true"` forces GitHub attestations regardless of visibility (only works where GitHub Artifact Attestations exist) |
 | `slsa-build-level` | *(none)* | Target SLSA build level for provenance generation |
 | `slsa-signer-workflow` | *(none)* | Reusable workflow identity used to verify artifact attestations with `gh attestation verify` |
 
-Use `secrets: inherit` in the caller (as in the example above) rather than declaring individual secrets — this workflow reads whatever registry/signing secrets it needs from the caller's own repo/environment secrets at the names it expects. **Exception:** the tailnet secrets `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` (vault mode with `join-tailscale`) must be passed explicitly — `secrets: inherit` does not deliver a caller org's selected-repository secrets to a workflow hosted in another org.
+Use `secrets: inherit` in the caller (as in the example above) rather than declaring individual secrets — this workflow reads whatever registry/signing secrets it needs from the caller's own repo/environment secrets at the names it expects. **Exception:** the LEGACY tailnet secrets `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` (only without `tailscale-audience`) must be passed explicitly — `secrets: inherit` does not deliver a caller org's selected-repository secrets to a workflow hosted in another org.
 
 ## Outputs
 

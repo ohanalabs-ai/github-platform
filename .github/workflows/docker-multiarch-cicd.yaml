@@ -14,8 +14,10 @@
 #     = {repository, ref, path} of the caller — the shape the clusters' ClusterImagePolicy CUE
 #     asserts (planeo-infra clusters/base/hooks/policy). The build job verifies the round trip
 #     with the exported public key; the 🛡️ slsa job re-verifies with no Vault access at all.
-#     Vault is tailnet-only for planeodev/ohanalabs-ai: set join-tailscale + pass the
-#     TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET secrets explicitly.
+#     Vault is tailnet-only for planeodev/ohanalabs-ai: set join-tailscale + tailscale-oauth-client-id
+#     + tailscale-audience (a Tailscale OIDC federated identity — NO secret: the tailnet join, the
+#     Vault login and the signing all ride the job's GitHub OIDC token). Legacy: the
+#     TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET secrets, passed explicitly.
 #   * PRIVATE caller repos without Vault inputs -> `none` (❕ not attested, informational).
 #   * `cosign` (keyless Sigstore, Fulcio + the PUBLIC Rekor log) is an EXPLICIT opt-in only:
 #     it publishes the private repository's name, workflow and digests to the public
@@ -124,12 +126,12 @@ on:
         default: github-jwt
       vault-role:
         description: >-
-          Vault JWT role the build job logs in as — bound to repository + ref and carrying the
-          ci-image-signer-<org> policy, e.g. gha-<repo>-<branch> (callers pass a format() of github.ref_name). A ref without a
-          role is simply not in vault-signing-refs.
+          Vault JWT role the build job logs in as, carrying the ci-image-signer-<org> policy.
+          Default = the org-wide role gha-<org>-image-signer (bound to the org's numeric id +
+          main|develop + push|workflow_dispatch — any repository of the org, no per-repo role).
         required: false
         type: string
-        default: ""
+        default: gha-${{ github.repository_owner }}-image-signer
       vault-jwt-audience:
         description: "`aud` of the GitHub OIDC token — must be in the role's bound_audiences."
         required: false
@@ -141,10 +143,10 @@ on:
         type: string
         default: ""
       transit-key:
-        description: Vault Transit signing key, one per org (planeodev-ci-images, ohanalabs-ai-ci-images).
+        description: Vault Transit signing key, one per org (planeodev-ci-images, ohanalabs-ai-ci-images). Default = <org>-ci-images.
         required: false
         type: string
-        default: ""
+        default: ${{ github.repository_owner }}-ci-images
       transit-path:
         description: Vault Transit mount path.
         required: false
@@ -153,7 +155,7 @@ on:
       vault-signing-refs:
         description: >-
           Refs whose build signs (comma/newline; exact, or a trailing-* prefix such as refs/tags/v*).
-          Default = the refs the admission CUE accepts and the per-repo Vault roles are bound to.
+          Default = the refs the admission CUE accepts and the org-wide Vault roles are bound to.
           pull_request events never sign, whatever this says.
         required: false
         type: string
@@ -161,10 +163,26 @@ on:
       join-tailscale:
         description: >-
           Join the runner to the tailnet before the Vault login (vault mode only) — Vault is
-          reachable only through the Tailscale subnet router. Needs the TS_OAUTH_* secrets.
+          reachable only through the Tailscale subnet router. Needs tailscale-oauth-client-id +
+          tailscale-audience (OIDC federated identity, no secret), or the legacy TS_OAUTH_* secrets.
         required: false
         type: boolean
         default: false
+      tailscale-oauth-client-id:
+        description: >-
+          Client id of the Tailscale OIDC federated identity (workload identity federation) that
+          trusts GitHub's OIDC issuer for this org. Not a secret — pass it as a literal or an org
+          variable. Empty = fall back to the TS_OAUTH_CLIENT_ID secret.
+        required: false
+        type: string
+        default: ""
+      tailscale-audience:
+        description: >-
+          Audience of that federated identity. Set = the tailnet join needs NO secret (the job's
+          id-token is exchanged). Empty = legacy OAuth client (TS_OAUTH_SECRET).
+        required: false
+        type: string
+        default: ""
       tailscale-tags:
         description: ACL tags of the ephemeral CI node.
         required: false
@@ -200,7 +218,8 @@ on:
     secrets:
       TS_OAUTH_CLIENT_ID:
         description: >-
-          Tailscale OAuth client (tags in tailscale-tags) — only read when join-tailscale is true.
+          LEGACY Tailscale OAuth client (tags in tailscale-tags) — only read when join-tailscale is
+          true and tailscale-audience is empty (prefer the secretless federated-identity inputs).
           Pass explicitly (`secrets: { TS_OAUTH_CLIENT_ID: … }`): `secrets: inherit` does not deliver
           a caller org's selected-repository secrets to a workflow hosted in another org.
         required: false
@@ -869,7 +888,8 @@ jobs:
           join-tailscale: ${{ inputs.join-tailscale }}
           tailscale-tags: ${{ inputs.tailscale-tags }}
           tailscale-args: ${{ inputs.tailscale-args }}
-          ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          ts-oauth-client-id: ${{ inputs.tailscale-oauth-client-id || secrets.TS_OAUTH_CLIENT_ID }}
+          ts-audience: ${{ inputs.tailscale-audience }}
           ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
 
       - name: Install cosign (explicit keyless opt-in → public Sigstore)
@@ -1101,7 +1121,8 @@ jobs:
           join-tailscale: ${{ inputs.join-tailscale }}
           tailscale-tags: ${{ inputs.tailscale-tags }}
           tailscale-args: ${{ inputs.tailscale-args }}
-          ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          ts-oauth-client-id: ${{ inputs.tailscale-oauth-client-id || secrets.TS_OAUTH_CLIENT_ID }}
+          ts-audience: ${{ inputs.tailscale-audience }}
           ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
 
       - name: Install cosign (explicit keyless opt-in → public Sigstore)
