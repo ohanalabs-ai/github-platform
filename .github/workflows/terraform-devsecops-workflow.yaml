@@ -784,14 +784,43 @@ jobs:
             terraform init
           fi
 
+      - name: Load the report helper (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .terraform-report
+          sparse-checkout: actions/terraform/report
+          persist-credentials: false
+
       - name: terraform apply
+        id: apply
         working-directory: ${{ inputs.working-directory }}
         run: |
+          set -euo pipefail
           VAR_FILE_ARG=""
           if [ -n "${{ inputs.var-file }}" ]; then
             VAR_FILE_ARG="-var-file=${{ inputs.var-file }}"
           fi
-          terraform apply -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }}
+          # tee: the output feeds the 📣 report step (annotations + job summary); pipefail keeps
+          # terraform's exit status as the step's.
+          terraform apply -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }} 2>&1 | tee "$RUNNER_TEMP/terraform-apply.txt"
+
+      - name: 📣 report terraform apply (annotations + job summary)
+        # Without this a failed apply shows only "Process completed with exit code 1" — the cause
+        # (provider error, resource address) sits deep in the raw log. One error annotation per
+        # Terraform `Error:` block, titled with the resource address, plus a summary table.
+        if: ${{ always() && steps.apply.outcome != 'skipped' }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TF_OPERATION: apply
+          TF_OUTCOME: ${{ steps.apply.outcome }}
+          TF_LOG_FILE: ${{ runner.temp }}/terraform-apply.txt
+          TF_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.terraform-report/actions/terraform/report/report.ts`);
+            await run({ core, exec, github, context });
 
   destroy:
     name: 🧨 destroy
@@ -903,11 +932,40 @@ jobs:
             terraform init
           fi
 
+      - name: Load the report helper (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .terraform-report
+          sparse-checkout: actions/terraform/report
+          persist-credentials: false
+
       - name: terraform destroy
+        id: destroy
         working-directory: ${{ inputs.working-directory }}
         run: |
+          set -euo pipefail
           VAR_FILE_ARG=""
           if [ -n "${{ inputs.var-file }}" ]; then
             VAR_FILE_ARG="-var-file=${{ inputs.var-file }}"
           fi
-          terraform destroy -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }}
+          # tee: the output feeds the 📣 report step (annotations + job summary); pipefail keeps
+          # terraform's exit status as the step's.
+          terraform destroy -auto-approve -no-color $VAR_FILE_ARG ${{ inputs.extra-args }} 2>&1 | tee "$RUNNER_TEMP/terraform-destroy.txt"
+
+      - name: 📣 report terraform destroy (annotations + job summary)
+        # Without this a failed destroy shows only "Process completed with exit code 1" — the cause
+        # (provider error, resource address) sits deep in the raw log. One error annotation per
+        # Terraform `Error:` block, titled with the resource address, plus a summary table.
+        if: ${{ always() && steps.destroy.outcome != 'skipped' }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TF_OPERATION: destroy
+          TF_OUTCOME: ${{ steps.destroy.outcome }}
+          TF_LOG_FILE: ${{ runner.temp }}/terraform-destroy.txt
+          TF_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.terraform-report/actions/terraform/report/report.ts`);
+            await run({ core, exec, github, context });
