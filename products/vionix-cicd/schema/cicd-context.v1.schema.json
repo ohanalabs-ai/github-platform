@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ohanalabs-ai/github-platform/products/vionix-cicd/schema/cicd-context.v1.schema.json",
+  "title": "vionix-cicd context envelope v1",
+  "description": "One versioned document passed between the jobs of a vionix-cicd pipeline: a readable `plain` part (YAML expressions can read it — never secrets) and an AES-256-GCM `sealed` part keyed by CONFIG_STREAM_KEY. Produced/validated by actions/build/cicd-context/context.ts.",
+  "type": "object",
+  "required": ["schema", "version", "plain", "sealed", "trail"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "vionix.dev/cicd-context/v1" },
+    "version": { "type": "integer", "minimum": 1, "description": "1 at seal; +1 per enrich" },
+    "plain": {
+      "type": "object",
+      "required": ["org", "githubHost"],
+      "properties": {
+        "org": { "type": "string", "minLength": 1, "description": "github.repository_owner of the run that sealed it" },
+        "githubHost": { "type": "string", "minLength": 1, "description": "host of GITHUB_SERVER_URL (github.com or a GHES host)" }
+      },
+      "propertyNames": { "pattern": "^(org|githubHost|[a-z][a-z0-9-]*)$" },
+      "additionalProperties": { "type": "object", "description": "a namespaced readable section (registry, image, scan, attest, …), append-only" }
+    },
+    "sealed": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "base64(iv[12] | tag[16] | AES-256-GCM(canonical JSON of {section: {NAME: string}})); AAD = canonical {schema, version, plain, trail}"
+    },
+    "trail": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stage", "job", "added"],
+        "additionalProperties": false,
+        "properties": {
+          "stage": { "type": "string" },
+          "job": { "type": "string" },
+          "runAttempt": { "type": "integer", "minimum": 1 },
+          "added": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

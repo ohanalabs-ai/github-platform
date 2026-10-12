@@ -1,0 +1,167 @@
+# 🧬 vionix-cicd-setup — the SETUP JOB of a vionix-cicd pipeline (products/vionix-cicd).
+#
+# Resolves everything the later jobs need, once, and hands it over as ONE output: the context envelope
+# (`context`) — readable `plain` sections + an AES-256-GCM `sealed` part keyed by CONFIG_STREAM_KEY.
+# The consuming jobs (build, scan, attest, …) take `vionix-context` + the CONFIG_STREAM_KEY secret and
+# never join the tailnet or log in to Vault for static configuration (the owner's config-stream
+# encoder/decoder pattern, ohanalabs-ai/ohana-github actions/build/config-stream-*, re-done encrypted).
+#
+#   1. 📦 helpers      this repo at this reusable's own commit (sparse: the actions it uses)
+#   2. 🌐 tailnet      optional — Tailscale OIDC federated identity (no secret): Vault is tailnet-only
+#   3. 🔐 vault        optional — GitHub OIDC → Vault JWT role; `vault-secrets` (vault-action syntax) land
+#                      in the env, masked, and are SEALED (`secret-env-names` = their env names)
+#   4. 🔑 key          CONFIG_STREAM_KEY: the caller's secret if passed, else get-config-stream from Vault
+#   5. 🧬 seal         plain-json + the sealed values → output `context`
+#   6. 🔒 revoke       the Vault token ends with the job
+#
+# Caller:
+#   jobs:
+#     setup:
+#       uses: ohanalabs-ai/github-platform/.github/workflows/vionix-cicd-setup.yaml@main
+#       permissions: { contents: read, id-token: write }
+#       with:
+#         vault-url: https://vault.platform.planeo.dev
+#         vault-role: gha-${{ github.repository_owner }}-cicd-setup
+#         vault-secrets: "planeo/data/platform/services/hub.docker.com/push token | DOCKERHUB_TOKEN"
+#         secret-env-names: DOCKERHUB_TOKEN
+#         join-tailscale: true
+#         tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}
+#         tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
+#         plain-json: '{"registry":{"host":"ghcr.io"}}'
+#       secrets:
+#         CONFIG_STREAM_KEY: ${{ secrets.CONFIG_STREAM_KEY }}   # explicit: `inherit` does not cross orgs
+#     build:
+#       needs: setup
+#       … with: { vionix-context: "${{ needs.setup.outputs.context }}" }  secrets: { CONFIG_STREAM_KEY: … }
+name: 🧬 vionix-cicd-setup
+run-name: 🧬 resolve the vionix-cicd context for ${{ github.repository }}@${{ github.ref_name }}
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      vault-url:
+        description: "Vault address (empty = no Vault: plain-json only, CONFIG_STREAM_KEY must be passed)"
+        type: string
+        default: ""
+      vault-auth-path:
+        type: string
+        default: github-jwt
+      vault-role:
+        description: JWT role bound to the org (read on the config-stream path + the records listed in vault-secrets)
+        type: string
+        default: ""
+      vault-jwt-audience:
+        type: string
+        default: https://github.com/${{ github.repository_owner }}
+      vault-secrets:
+        description: "hashicorp/vault-action `secrets` (path field | ENV_NAME ;) — exported masked, then sealed"
+        type: string
+        default: ""
+      secret-env-names:
+        description: The env names from vault-secrets to seal (comma/space)
+        type: string
+        default: ""
+      secret-section:
+        description: Sealed section name for them
+        type: string
+        default: setup
+      kv-mount:
+        description: KV v2 mount of the config-stream key
+        type: string
+        default: planeo
+      join-tailscale:
+        type: boolean
+        default: false
+      tailscale-oauth-client-id:
+        description: Org variable TS_FEDERATED_CLIENT_ID (not a secret)
+        type: string
+        default: ""
+      tailscale-audience:
+        description: Org variable TS_FEDERATED_AUDIENCE (not a secret)
+        type: string
+        default: ""
+      tailscale-tags:
+        type: string
+        default: tag:ci
+      plain-json:
+        description: Readable sections to seed the context with (JSON object; never secrets)
+        type: string
+        default: "{}"
+    secrets:
+      CONFIG_STREAM_KEY:
+        description: The org secret copy of the key. Not passed = read from Vault (needs vault-url + vault-role).
+        required: false
+    outputs:
+      context:
+        description: The sealed context envelope (JSON) — pass as `vionix-context` to the next jobs
+        value: ${{ jobs.setup.outputs.context }}
+      version:
+        value: ${{ jobs.setup.outputs.version }}
+jobs:
+  setup:
+    name: 🧬 setup (resolve the context)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CONFIG_STREAM_KEY: ${{ secrets.CONFIG_STREAM_KEY }}
+    outputs:
+      context: ${{ steps.seal.outputs.context }}
+      version: ${{ steps.seal.outputs.version }}
+    steps:
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .vionix-cicd
+          sparse-checkout: |
+            actions/build/cicd-context
+            actions/secrets/vault
+            actions/network/tailscale
+          persist-credentials: false
+
+      - name: 🌐 join the tailnet (federated identity, no secret)
+        if: ${{ inputs.join-tailscale }}
+        uses: ./.vionix-cicd/actions/network/tailscale/join
+        with:
+          oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+          audience: ${{ inputs.tailscale-audience }}
+          tags: ${{ inputs.tailscale-tags }}
+
+      - name: 🔐 Vault login (GitHub OIDC) + listed records
+        if: ${{ inputs.vault-url != '' }}
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-url }}
+          method: jwt
+          path: ${{ inputs.vault-auth-path }}
+          role: ${{ inputs.vault-role }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportEnv: true
+          exportToken: true
+          secrets: ${{ inputs.vault-secrets }}
+
+      - name: 🔑 CONFIG_STREAM_KEY (caller secret, else Vault)
+        if: ${{ inputs.vault-url != '' }}
+        uses: ./.vionix-cicd/actions/secrets/vault/get-config-stream
+        with:
+          kv-mount: ${{ inputs.kv-mount }}
+
+      - name: 🧬 seal the context
+        id: seal
+        uses: ./.vionix-cicd/actions/build/cicd-context
+        with:
+          mode: seal
+          plain-json: ${{ inputs.plain-json }}
+          secret-env-names: ${{ inputs.secret-env-names }}
+          secret-section: ${{ inputs.secret-section }}
+          stage: setup
+
+      - name: 🔒 revoke the Vault token
+        if: ${{ always() && inputs.vault-url != '' }}
+        uses: ./.vionix-cicd/actions/secrets/vault/revoke-token
