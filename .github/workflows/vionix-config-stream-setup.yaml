@@ -1,0 +1,111 @@
+# 🔑 vionix-config-stream-setup — create (once) or rotate the org's CONFIG_STREAM_KEY.
+#
+# Vault is the system of record: <kv-mount>/global/<github-host>/<org>/platform/vionix/config-stream,
+# field CONFIG_STREAM_KEY (32 random bytes, base64), created with KV `cas: 0` so an existing key is
+# never replaced by accident; `rotate: true` replaces it (compare-and-set). With push-org-secret, the
+# same value becomes the ORG secret CONFIG_STREAM_KEY (visibility private) — the copy consuming jobs
+# decrypt the context with, so they never reach Vault. The value is never printed.
+#
+# A caller repo of the org wraps it in a workflow_dispatch (manual, audited run):
+#   on: { workflow_dispatch: { inputs: { rotate: { type: boolean, default: false } } } }
+#   jobs:
+#     key:
+#       uses: ohanalabs-ai/github-platform/.github/workflows/vionix-config-stream-setup.yaml@main
+#       permissions: { contents: read, id-token: write }
+#       with: { vault-url: …, vault-role: gha-<org>-config-stream-admin, rotate: "${{ inputs.rotate }}", push-org-secret: true,
+#               tailscale-oauth-client-id: "${{ vars.TS_FEDERATED_CLIENT_ID }}", tailscale-audience: "${{ vars.TS_FEDERATED_AUDIENCE }}" }
+#       secrets: { ORG_ADMIN_TOKEN: "${{ secrets.… }}" }
+name: 🔑 vionix-config-stream-setup
+run-name: 🔑 ${{ inputs.rotate && 'rotate' || 'create' }} the vionix CONFIG_STREAM_KEY of ${{ github.repository_owner }}
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      vault-url:
+        type: string
+        required: true
+      vault-auth-path:
+        type: string
+        default: github-jwt
+      vault-role:
+        description: JWT role with create/update on the org's config-stream path only (manual dispatch on the default branch)
+        type: string
+        required: true
+      vault-jwt-audience:
+        type: string
+        default: https://github.com/${{ github.repository_owner }}
+      kv-mount:
+        type: string
+        default: planeo
+      rotate:
+        type: boolean
+        default: false
+      push-org-secret:
+        type: boolean
+        default: false
+      join-tailscale:
+        type: boolean
+        default: true
+      tailscale-oauth-client-id:
+        type: string
+        default: ""
+      tailscale-audience:
+        type: string
+        default: ""
+    secrets:
+      ORG_ADMIN_TOKEN:
+        description: admin:org token — only for push-org-secret
+        required: false
+concurrency:
+  group: vionix-config-stream-${{ github.repository_owner }}
+  cancel-in-progress: false
+jobs:
+  key:
+    name: 🔑 config-stream key (${{ inputs.rotate && 'rotate' || 'create if missing' }})
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .vionix-cicd
+          sparse-checkout: |
+            actions/secrets/vault
+            actions/network/tailscale
+          persist-credentials: false
+
+      - name: 🌐 join the tailnet (federated identity, no secret)
+        if: ${{ inputs.join-tailscale }}
+        uses: ./.vionix-cicd/actions/network/tailscale/join
+        with:
+          oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+          audience: ${{ inputs.tailscale-audience }}
+
+      - name: 🔐 Vault login (GitHub OIDC)
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-url }}
+          method: jwt
+          path: ${{ inputs.vault-auth-path }}
+          role: ${{ inputs.vault-role }}
+          jwtGithubAudience: ${{ inputs.vault-jwt-audience }}
+          exportToken: true
+
+      - name: 🔑 create / rotate CONFIG_STREAM_KEY
+        uses: ./.vionix-cicd/actions/secrets/vault/setup-config-stream
+        with:
+          kv-mount: ${{ inputs.kv-mount }}
+          rotate: ${{ inputs.rotate }}
+          push-org-secret: ${{ inputs.push-org-secret }}
+          org-admin-token: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+      - name: 🔒 revoke the Vault token
+        if: ${{ always() }}
+        uses: ./.vionix-cicd/actions/secrets/vault/revoke-token

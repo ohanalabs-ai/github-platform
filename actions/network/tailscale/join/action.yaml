@@ -1,0 +1,35 @@
+name: 🌐 tailscale join (secretless)
+description: >-
+  Join the runner to the tailnet with a Tailscale OIDC FEDERATED IDENTITY — the job's GitHub OIDC token is
+  exchanged for an ephemeral node key; no secret. Callers pass the org variables TS_FEDERATED_CLIENT_ID /
+  TS_FEDERATED_AUDIENCE (identifiers, not secrets). Needs `permissions: id-token: write`.
+inputs:
+  oauth-client-id:
+    description: Federated identity client id (org variable TS_FEDERATED_CLIENT_ID)
+    required: true
+  audience:
+    description: Federated identity audience (org variable TS_FEDERATED_AUDIENCE)
+    required: true
+  tags:
+    description: Node tags — must be granted by the federated identity
+    required: false
+    default: tag:ci
+  args:
+    description: Extra `tailscale up` flags
+    required: false
+    default: --accept-routes
+  ping:
+    description: Optional comma-separated hosts to ping until reachable (eventual consistency of a new peer)
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: 🌐 tailscale/github-action (workload identity federation)
+      uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+      with:
+        oauth-client-id: ${{ inputs.oauth-client-id }}
+        audience: ${{ inputs.audience }}
+        tags: ${{ inputs.tags }}
+        args: ${{ inputs.args }}
+        ping: ${{ inputs.ping }}
