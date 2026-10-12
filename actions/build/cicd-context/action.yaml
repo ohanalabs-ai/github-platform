@@ -1,0 +1,77 @@
+name: 🧬 vionix cicd-context
+description: >-
+  Seal, open or enrich the vionix-cicd CONTEXT ENVELOPE — one versioned JSON passed between the jobs of
+  a vionix-cicd pipeline: a readable `plain` part (YAML expressions can read it) and an AES-256-GCM
+  `sealed` part (secrets), keyed by CONFIG_STREAM_KEY. See products/vionix-cicd/README.md.
+inputs:
+  mode:
+    description: "seal (setup job) | open (consumer: masks + exports the sealed values) | enrich (add a section)"
+    required: true
+  context:
+    description: "The envelope JSON (open/enrich) — e.g. needs.setup.outputs.context"
+    required: false
+    default: ""
+  config-stream-key:
+    description: "32-byte base64 key (the CONFIG_STREAM_KEY secret). Empty = read env CONFIG_STREAM_KEY (get-config-stream exports it)."
+    required: false
+    default: ""
+  plain-json:
+    description: "seal: extra readable sections (JSON object). enrich: the readable data of `section`. Never secrets."
+    required: false
+    default: ""
+  secret-env-names:
+    description: "Comma/space list of env vars (e.g. exported by hashicorp/vault-action) to seal — seal: into `secret-section`; enrich: into `section`"
+    required: false
+    default: ""
+  secret-section:
+    description: "seal: name of the sealed section the secret-env-names go to"
+    required: false
+    default: setup
+  section:
+    description: "enrich: the new section name (lower-kebab-case; append-only)"
+    required: false
+    default: ""
+  stage:
+    description: "Trail label of this job's stage (setup, build, scan, attest, …)"
+    required: false
+    default: ""
+  export-env:
+    description: "open: export every sealed value as a masked env var"
+    required: false
+    default: "true"
+  dotenv-path:
+    description: "open: also write the sealed values to this .env file (mode 0600) — e.g. for docker compose"
+    required: false
+    default: ""
+outputs:
+  context:
+    description: "seal/enrich: the new envelope JSON (job output material)"
+    value: ${{ steps.ctx.outputs.context }}
+  plain:
+    description: "open: the readable part as JSON"
+    value: ${{ steps.ctx.outputs.plain }}
+  version:
+    description: "The envelope version after this step"
+    value: ${{ steps.ctx.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - name: 🧬 cicd-context ${{ inputs.mode }}
+      id: ctx
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        HELPERS: ${{ github.action_path }}
+        MODE: ${{ inputs.mode }}
+        CONTEXT: ${{ inputs.context }}
+        CONTEXT_KEY: ${{ inputs.config-stream-key }}
+        PLAIN_JSON: ${{ inputs.plain-json }}
+        SECRET_ENV_NAMES: ${{ inputs.secret-env-names }}
+        SECRET_SECTION: ${{ inputs.secret-section }}
+        SECTION: ${{ inputs.section }}
+        STAGE: ${{ inputs.stage }}
+        EXPORT_ENV: ${{ inputs.export-env }}
+        DOTENV_PATH: ${{ inputs.dotenv-path }}
+      with:
+        script: |
+          const { default: run } = await import(`${process.env.HELPERS}/context.ts`);
+          await run({ core, exec, github, context });
