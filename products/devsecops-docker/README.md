@@ -105,6 +105,41 @@ goes red there (shift-left). An empty `image_ref` (closed PR) is handled by the 
 2. Registry credentials available to the caller — either the default `GITHUB_TOKEN` for `ghcr.io` (already permitted via `secrets: inherit`), or explicit Docker Hub credentials if mirroring there.
 3. For SLSA attestation: the repo's Actions permissions must allow `id-token: write` and `attestations: write` (set in the caller's `permissions:` block, not this reusable workflow's own — a caller must grant them explicitly per GitHub's reusable-workflow permission model).
 
+## Planeo deploy stamp (scan + attest) — ONE job after any build
+
+Owner rule (2026-10-13): **scan + attestation is what every repository adds to meet the security
+posture.** [`docker-scan-attest.yaml`](../../.github/workflows/docker-scan-attest.yaml) bundles it:
+`docker-image-security` (scan) → `docker-image-attest` (SLSA provenance + SBOM with the org's Vault
+Transit key, no public log) → a `📋 summary` that classifies the image's proofs. Add one job after the
+build — nothing else changes in the caller:
+
+```yaml
+  scan-attest:
+    needs: build                       # the job calling docker-multiarch-cicd.yaml
+    permissions: { contents: read, packages: write, id-token: write, attestations: read, pull-requests: write }
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-scan-attest.yaml@main
+    with:
+      image: ${{ needs.build.outputs.image_ref }}
+      build-identity: ${{ needs.build.outputs.build_identity }}
+      builder-id: ${{ needs.build.outputs.builder_id }}
+      tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}   # org variables (identifiers, not secrets)
+      tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
+      # severity-threshold: CRITICAL    # default NONE = report-only; a failed gate = no stamp
+```
+
+**Classification** (shown in every run's summary):
+
+| Proof | Made by | When | Ledger | Trusted by |
+|---|---|---|---|---|
+| 🌐 **public provenance** | the build (`docker-multiarch-cicd`, `attestation-mode: auto`) | PUBLIC repositories | public Sigstore Rekor (GitHub artifact attestation) | anyone — `gh attestation verify`; **not** Planeo admission |
+| 🔏 **Planeo deploy stamp** | `docker-scan-attest` (scan + Vault attest) | push / `workflow_dispatch` on a signing ref (default `main`, `develop`) | none public (Vault Transit; a private Vionix Rekor later — INTEGRATE-32) | **Planeo admission** (`<org>-approved-build` ClusterImagePolicy) |
+
+A public repo gets **both**; a private repo gets the deploy stamp only. Pull requests are scanned (and
+PR-commented) but never stamped — the push build of the merge is. A push/dispatch on a signing ref that
+ends **without** a stamp fails the summary job (the stamp was expected). Secretless: the tailnet join
+uses the org's Tailscale OIDC federated identity and the Vault login GitHub OIDC (role
+`gha-<org>-image-signer`); the repo needs no secret. Outputs: `stamped`, `key-ref`, `scan-status`.
+
 ## Sign with the org's key: build → scan → attest
 
 The builder only needs registry credentials. Signing is its own reusable,
