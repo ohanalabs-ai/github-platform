@@ -1,0 +1,46 @@
+# Create (once) or rotate the ohanalabs-ai org's CONFIG_STREAM_KEY — this repo's OWN manual run of
+# the shared reusable vionix-config-stream-setup.yaml (a reusable workflow cannot be dispatched by
+# hand; this wrapper is that audited entry point for the ohanalabs-ai org — planeodev's twin lives in
+# planeodev/planeo-infra .github/workflows/vionix-config-stream-setup.yml).
+#
+# GitHub OIDC → tailnet (Tailscale OIDC federated identity, org variables TS_FEDERATED_*) → Vault
+# role gha-ohanalabs-ai-config-stream-admin (workflow_dispatch only, main|develop, bound to the
+# reusable @refs/heads/main — planeodev/planeo-infra vault/clusters/platform-aws-eks-use1-prd/
+# github-actions) → KV planeo/global/github.com/ohanalabs-ai/platform/vionix/config-stream, field
+# CONFIG_STREAM_KEY. A first run creates it (KV cas 0); `rotate` replaces it. Never printed.
+#
+# push-org-secret also sets the ORG secret CONFIG_STREAM_KEY; it needs an admin:org token as
+# ORG_ADMIN_TOKEN — none exists yet (planeo-infra #402 BACKLOG). Leave it off until then.
+name: 🔑 vionix config-stream key (ohanalabs-ai)
+run-name: "🔑 vionix config-stream key — ${{ inputs.rotate && 'ROTATE' || 'create' }}${{ inputs.push-org-secret && ' + org secret' || '' }} (ohanalabs-ai)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      rotate:
+        description: Replace the existing key (compare-and-set). Off = create only; an existing key is kept.
+        type: boolean
+        default: false
+      push-org-secret:
+        description: Also set the org secret CONFIG_STREAM_KEY (needs the ORG_ADMIN_TOKEN secret).
+        type: boolean
+        default: false
+
+jobs:
+  key:
+    permissions:
+      contents: read
+      id-token: write
+    # Local reference: this repo IS github-platform, so the reusable runs at the dispatched commit —
+    # the Vault role binds job_workflow_ref @refs/heads/main, so dispatch from main.
+    uses: ./.github/workflows/vionix-config-stream-setup.yaml
+    with:
+      vault-url: https://vault.platform.planeo.dev
+      vault-role: gha-ohanalabs-ai-config-stream-admin
+      rotate: ${{ inputs.rotate }}
+      push-org-secret: ${{ inputs.push-org-secret }}
+      join-tailscale: true
+      tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}
+      tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
