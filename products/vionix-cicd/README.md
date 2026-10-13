@@ -107,13 +107,14 @@ jobs:
 
 This is the **design + building blocks** (INTEGRATE-29). Not here yet:
 
-- `docker-multiarch-cicd.yaml` back to a clean builder (Vault/Tailscale removed) that accepts
-  `vionix-context` and **enriches** it with `image` (ref + digests) —
-  [#44](https://github.com/ohanalabs-ai/github-platform/pull/44) is rebuilt on this.
-- `docker-image-attest.yaml` (build provenance or scan `vuln` → Vault Transit → cosign), absorbing
-  [#43](https://github.com/ohanalabs-ai/github-platform/pull/43)'s `vault-sign`. Signing stays a live
-  Vault call in that one workflow — Transit keys never leave Vault, so it cannot be pre-fetched.
-- planeo-infra Vault side: roles `gha-<org>-cicd-setup` (read the config-stream path + listed records)
+- ✅ `docker-multiarch-cicd.yaml` is a clean builder again (no Vault/Tailscale); it outputs
+  `image_ref` + `build_identity` for the attest job
+  ([#44](https://github.com/ohanalabs-ai/github-platform/pull/44)). **Still open:** accepting
+  `vionix-context` and **enriching** it with `image` (ref + digests).
+- ✅ `docker-image-attest.yaml` (build provenance or scan `vuln` → Vault Transit → cosign), absorbing
+  [#43](https://github.com/ohanalabs-ai/github-platform/pull/43)'s `vault-sign` (#44). Signing stays a
+  live Vault call in that one workflow — Transit keys never leave Vault, so it cannot be pre-fetched.
+- planeo-infra Vault side ([planeodev/planeo-infra#402](https://github.com/planeodev/planeo-infra/pull/402)): roles `gha-<org>-cicd-setup` (read the config-stream path + listed records)
   and `gha-<org>-config-stream-admin` (create/update that path, dispatch only), and the `global/`
   folder in the Vault folder design.
 - TLS to Vault: public CAs only (Node's `fetch` takes no per-request CA without npm `undici`).

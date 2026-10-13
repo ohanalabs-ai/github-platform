@@ -1,5 +1,6 @@
-// 🛡️ Independent verification of a Vault-Transit-signed image — runs in the 🛡️ slsa job, which has
-// NO Vault access: only the exported PUBLIC key (build-job output) and the registry. Same checks as
+// 🛡️ Independent verification of a Vault-Transit-signed image — runs in the 🛡️ verify job of
+// docker-image-attest.yaml, which has
+// NO Vault access: only the exported PUBLIC key (attest-job output) and the registry. Same checks as
 // admission: `cosign verify --key` + `cosign verify-attestation --type slsaprovenance1 --policy <the
 // org's approved-build CUE>`. Emits the outputs the ohanalabs-ai/actions docker/slsa-report action
 // emits, so the workflow's summary / PR comment / release steps stay mechanism-agnostic.
@@ -41,13 +42,15 @@ export default async function run({ core, exec }: Ctx): Promise<void> {
   const keyRef = e.KEY_REF || "";
   const level = e.SLSA_BUILD_LEVEL || "2";
   const title = e.TITLE || "SLSA verification";
+  let summary = "";
   const out = (status: string, verified: boolean, reason: string) => {
+    summary = reportMarkdown({ title, status, subject, keyRef, reason, level });
     core.setOutput("verified", String(verified));
     core.setOutput("attested_by", verified ? "vault" : "none");
     core.setOutput("status", status);
     core.setOutput("declared_slsa_build_level", level);
     core.setOutput("verification_command", consumerCommand(subject, keyRef));
-    core.setOutput("summary_markdown", reportMarkdown({ title, status, subject, keyRef, reason, level }));
+    core.setOutput("summary_markdown", summary);
   };
   if (e.SIGNED !== "true") {
     const reason = e.SIGN_REASON || (e.GITHUB_EVENT_NAME === "pull_request"
@@ -55,6 +58,7 @@ export default async function run({ core, exec }: Ctx): Promise<void> {
       : "the build did not sign this digest");
     out("not-attested", false, reason);
     core.notice(`❕ ${subject} not attested: ${reason}`);
+    await core.summary.addRaw(summary, true).write();
     return;
   }
   const pub = Buffer.from(e.PUBLIC_KEY_B64 || "", "base64").toString("utf8");
@@ -74,8 +78,10 @@ export default async function run({ core, exec }: Ctx): Promise<void> {
     out("failed", false, why);
     if ((e.FAIL_ON_UNVERIFIED || "true") === "true") core.setFailed(`❌ ${subject}: ${why}`);
     else core.warning(`❌ ${subject}: ${why}`);
+    await core.summary.addRaw(summary, true).write();
     return;
   }
   out("verified", true, "signature + SLSA provenance + approved-build CUE verified with the exported public key");
   core.info(`✅ ${subject} verified against ${keyRef}`);
+  await core.summary.addRaw(summary, true).write();
 }

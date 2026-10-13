@@ -24,42 +24,9 @@ jobs:
       docker-compose-file-name: docker-compose.yaml
       dockerhub-registry: docker.io
       dockerhub-namespace: ${{ github.repository_owner }}
-      # attestation-mode: auto   # default — public repo: GitHub attestations; private repo: vault (below) or none
+      # attestation-mode: auto   # default — public repo: GitHub attestations; private repo: none here → docker-image-attest.yaml
     secrets: inherit
 ```
-
-Private repository signing with the org's **Vault Transit key** (`attestation-mode: vault`, the
-`auto` default once `vault-url` + `transit-key` are set). The caller grants `id-token: write`,
-names its per-branch Vault role, and passes the tailnet secrets **explicitly** (Vault is
-tailnet-only; `secrets: inherit` does not cross orgs):
-
-```yaml
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, closed]
-  push:
-    branches: [main, develop]   # the push build of the merge commit is the one that signs
-
-jobs:
-  docker-multiarch:
-    uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
-    permissions: { contents: write, packages: write, id-token: write, attestations: write, artifact-metadata: write, pull-requests: write }
-    with:
-      docker-compose-file-name: docker-compose.yaml
-      vault-url: https://vault.platform.planeo.dev                # or an org variable
-      join-tailscale: true                                         # Vault is tailnet-only
-      tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }} # Tailscale OIDC federated identity — NOT a secret
-      tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}        # NOT a secret
-      # vault-role / transit-key default to gha-<org>-image-signer / <org>-ci-images (org-wide)
-```
-
-**No secret anywhere in the signing path.** Every hop trades the job's GitHub OIDC token
-(`id-token: write`): Tailscale's federated identity (trusts `token.actions.githubusercontent.com`
-+ a subject pattern for the org, tag `tag:ci`) issues an ephemeral node key; Vault's `github-jwt`
-role (bound to the org's numeric id, `main|develop`, `push|workflow_dispatch`) issues a 15-minute
-token carrying `ci-image-signer-<org>`; Transit signs. The client id and audience are identifiers,
-not credentials — they only work for a token GitHub minted for a run of this org. The legacy
-`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` secrets still work when `tailscale-audience` is empty.
 
 Always reference `@main` — this is an internal, org-owned workflow repo, so callers are expected to track the latest reviewed version rather than pin a SHA (unlike third-party actions, which this org's own `actions-pin-version-setting-lint.yaml` requires pinning).
 
@@ -79,23 +46,12 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `dockerhub-namespace` | `${{ github.repository_owner }}` | Optional Docker Hub namespace for release mirroring |
 | `dockerhub-registry-username` | *(none)* | Optional Docker Hub username, for mirroring a release build |
 | `dockerhub-registry-token` | *(none)* | Optional Docker Hub token, for mirroring a release build — pass as `${{ secrets.DOCKERHUB_TOKEN }}` from the caller |
-| `attestation-mode` | `auto` | How the image gets verifiable provenance: `auto` (public repo → GitHub attestations; private repo → `vault` when `vault-url` + `transit-key` are set, else `none`), `github`, `vault`, `cosign` (**explicit opt-in only — keyless Sigstore writes the private repo's name, workflow and digests to the PUBLIC Rekor transparency log**), `none` |
-| `vault-url` | `""` | Vault address for `vault` mode (tailnet-only for our orgs → also `join-tailscale`) |
-| `vault-auth-path` | `github-jwt` | Vault JWT auth mount bound to GitHub's OIDC issuer |
-| `vault-role` | `gha-<owner>-image-signer` | JWT role the build job logs in as, carrying `ci-image-signer-<org>` — the org-wide role (no per-repo role) |
-| `vault-jwt-audience` | `https://github.com/<owner>` | `aud` of the OIDC token; must be in the role's `bound_audiences` |
-| `vault-ca-cert` | `""` | Optional base64 PEM CA bundle for a Vault behind a private CA |
-| `transit-key` | `<owner>-ci-images` | Transit signing key, one per org: `planeodev-ci-images`, `ohanalabs-ai-ci-images` |
-| `transit-path` | `transit` | Transit mount path |
-| `vault-signing-refs` | `refs/heads/main,refs/heads/develop` | Refs whose build signs (exact or trailing-`*` prefix). `pull_request` events never sign. Tag releases sign only if you add e.g. `refs/tags/v*` **and** a Vault role bound to those refs |
-| `join-tailscale` | `false` | Join the tailnet before the Vault login (`tailscale/github-action` v4) |
-| `tailscale-oauth-client-id` / `tailscale-audience` | `""` | Tailscale OIDC federated identity (workload identity federation) — secretless join; not secrets. Empty audience = legacy secrets `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` |
-| `tailscale-tags` / `tailscale-args` | `tag:ci` / `--accept-routes` | Tailnet node tags / `tailscale up` flags |
+| `attestation-mode` | `auto` | How the image gets verifiable provenance **in the build**: `auto` (public repo → GitHub attestations; private repo → `none` — sign with the org's key in a following [`docker-image-attest.yaml`](#sign-with-the-orgs-key-build--scan--attest) job), `github`, `cosign` (**explicit opt-in only: keyless Sigstore writes the private repo's name, workflow and digests to the PUBLIC Rekor log**), `none` |
 | `push-attestations` | `"false"` | Legacy override: `"true"` forces GitHub attestations regardless of visibility (only works where GitHub Artifact Attestations exist) |
 | `slsa-build-level` | *(none)* | Target SLSA build level for provenance generation |
 | `slsa-signer-workflow` | *(none)* | Reusable workflow identity used to verify artifact attestations with `gh attestation verify` |
 
-Use `secrets: inherit` in the caller (as in the example above) rather than declaring individual secrets — this workflow reads whatever registry/signing secrets it needs from the caller's own repo/environment secrets at the names it expects. **Exception:** the LEGACY tailnet secrets `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` (only without `tailscale-audience`) must be passed explicitly — `secrets: inherit` does not deliver a caller org's selected-repository secrets to a workflow hosted in another org.
+Use `secrets: inherit` in the caller (as in the example above) rather than declaring individual secrets — this workflow reads whatever registry/signing secrets it needs from the caller's own repo/environment secrets at the names it expects.
 
 ## Outputs
 
@@ -103,9 +59,9 @@ Use `secrets: inherit` in the caller (as in the example above) rather than decla
 |---|---|---|
 | `image_ref` | PR, ref or release build | Digest-pinned reference of the image this run built: `<base>/pr/<N>@sha256:…` on a PR, `<base>@sha256:…` on a branch or tag. Empty when nothing was built (closed PR) |
 | `image_digest` | PR, ref or release build | The `sha256:…` digest of that image |
+| `build_identity` | ref or release build | The build job's identity for provenance: base64(JSON) of its GitHub OIDC claims (`repository`, `ref`, `sha`, `workflow_ref`, `job_workflow_ref` = this reusable, `run_id`, …) — never the token. Feed it with `image_ref` to `docker-image-attest.yaml`. Empty on PR builds or without `id-token: write` |
+| `builder_id` | ref or release build | The `builder.id` the provenance will carry (`https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@<ref>`) |
 | `image_tag`, `image_base`, `short_sha`, `effective_ref` | ref build only | Unchanged legacy outputs of the branch build |
-| `signed` | ref or release build (`vault` mode) | `"true"` when the digest was signed + attested with the Vault Transit key and the round trip verified |
-| `signature_key_ref` | ref or release build (`vault` mode) | `hashivault://<transit-key>`; empty when not signed |
 
 ## Compose an image scan after the build
 
@@ -141,7 +97,7 @@ goes red there (shift-left). An empty `image_ref` (closed PR) is handled by the 
 - **🧱 ref-build** — builds on every push to the default branch (floating `:main` + immutable `:main-<sha7>` tags).
 - **🏷️ release** — builds and publishes a release on a `v*` tag push, optionally mirroring to Docker Hub.
 - **📝 github-release** — updates the GitHub Release notes with the verified image/digest/attestation details.
-- **🛡️ slsa** — verifies the build's provenance with [`ohanalabs-ai/actions/docker/slsa-report`](https://github.com/ohanalabs-ai/actions/tree/main/docker/slsa-report) (`github`/`cosign`) or, in `vault` mode, with [`actions/docker/vault-sign/verify.ts`](../../actions/docker/vault-sign/) — **no Vault access in this job**: the build's exported public key, `cosign verify` + `cosign verify-attestation --type slsaprovenance1 --policy <the org's approved-build CUE>` (the same checks the clusters' policy-controller makes). Outcomes: ✅ **verified** (`github`, `cosign` or `vault`) · ❕ **not attested — informational** (`none`, a PR / merged-PR build, or a ref outside `vault-signing-refs`) · ❌ **verification failed** (an attestation exists but does not match — the only red case).
+- **🛡️ slsa** — verifies the build's provenance with [`ohanalabs-ai/actions/docker/slsa-report`](https://github.com/ohanalabs-ai/actions/tree/main/docker/slsa-report) and reports which mechanism attested the digest. Outcomes: ✅ **verified** (`github` or `cosign`) · ❕ **not attested — informational** (`attestation-mode: none`, or a private repo on the old GitHub-only path) · ❌ **verification failed** (an attestation exists but does not match the signer — the only red case).
 
 ## Prerequisites for a calling repo
 
@@ -149,40 +105,78 @@ goes red there (shift-left). An empty `image_ref` (closed PR) is handled by the 
 2. Registry credentials available to the caller — either the default `GITHUB_TOKEN` for `ghcr.io` (already permitted via `secrets: inherit`), or explicit Docker Hub credentials if mirroring there.
 3. For SLSA attestation: the repo's Actions permissions must allow `id-token: write` and `attestations: write` (set in the caller's `permissions:` block, not this reusable workflow's own — a caller must grant them explicitly per GitHub's reusable-workflow permission model).
 
+## Sign with the org's key: build → scan → attest
+
+The builder only needs registry credentials. Signing is its own reusable,
+[`docker-image-attest.yaml`](../../.github/workflows/docker-image-attest.yaml) (Jira INTEGRATE-29):
+cosign `--key hashivault://<org>-ci-images` (Vault Transit — the private key never leaves Vault),
+**no transparency log**, a round-trip verification with the exported public key, and an independent
+🛡️ verify job with no Vault access. It needs the build's `image_ref` and `build_identity`:
+
+```yaml
+permissions: { contents: write, packages: write, id-token: write, attestations: write, artifact-metadata: write, pull-requests: write }
+jobs:
+  docker:
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+    with: { docker-compose-file-name: docker-compose.yaml }   # private repo → attestation-mode auto = none
+    secrets: inherit
+  scan:
+    needs: docker
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-security.yaml@main
+    with: { image: "${{ needs.docker.outputs.image_ref }}" }
+  attest:
+    needs: [docker, scan]
+    if: needs.docker.outputs.build_identity != ''        # PR builds never sign
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-attest.yaml@main
+    permissions: { contents: read, packages: write, id-token: write }
+    with:
+      image: ${{ needs.docker.outputs.image_ref }}
+      build-identity: ${{ needs.docker.outputs.build_identity }}
+      vault-url: https://vault.platform.planeo.dev
+      join-tailscale: true                                     # Vault is tailnet-only
+      tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}   # identifiers, not secrets
+      tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
+      # vault-role / transit-key default to gha-<org>-image-signer / <org>-ci-images
+```
+
+**Why the provenance names the BUILD workflow.** The clusters' admission CUE (planeo-infra
+`clusters/base/hooks/policy/clusterimagepolicy-<org>.yaml`) asserts `builder.id` =
+`docker-multiarch-cicd.yaml@…`. The attest job runs as a different reusable, so its own OIDC
+`job_workflow_ref` is never the builder: the build job captures its identity (`build_identity`) and
+the attest job **binds** it to its own token — same repository, commit, ref and run — before writing
+it into the predicate. A caller cannot feed a foreign identity in. The org-wide Vault role
+(`gha-<org>-image-signer`, planeo-infra #399) binds the org's numeric id, the branch and the event,
+**not** `job_workflow_ref`, so this reusable is allowed to sign.
+
+**Vendor images** (not built by us — INTEGRATE-31, future): scan → attest with `mode: vuln`
+(`vuln-predicate-artifact` + `vuln-predicate-path` from the scan job, `transit-key: <org>-image-scan`,
+`cosign-repository` when we cannot push next to the image).
+
+| `docker-image-attest.yaml` input | Default | |
+|---|---|---|
+| `image` | — | `<registry>/<repo>@sha256:…` (the builder's `image_ref`) |
+| `mode` | `provenance` | `provenance` (signature + SLSA v1 + SPDX SBOM) · `vuln` (a scan result) |
+| `build-identity` | `""` | the builder's `build_identity` (mode provenance) |
+| `vault-url` / `vault-role` / `transit-key` | — / `gha-<owner>-image-signer` / `<owner>-ci-images` | Vault login + key |
+| `join-tailscale` + `tailscale-oauth-client-id` + `tailscale-audience` | `false` | secretless tailnet join (org variables `TS_FEDERATED_*`) |
+| `signing-refs` | `refs/heads/main,refs/heads/develop` | refs whose runs may sign; `pull_request` never signs |
+| outputs | | `signed`, `key-ref`, `public-key-b64`, `builder-id` |
+
 ## Build provenance: public vs private repositories
 
 | Caller repo | Mechanism (`attestation-mode: auto`) | Produced in the build job | Consumers verify with |
 |---|---|---|---|
 | **public** | GitHub Artifact Attestations | `actions/attest-build-provenance` + `attest-sbom`, pushed to GHCR | `gh attestation verify oci://<image>@<digest> --repo <owner/repo> --signer-workflow ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml` |
-| **private** + `vault-url`/`transit-key` | **Vault Transit** (our key, `vault`) | in 🧱 ref-build / 🏷️ release only, never on `pull_request`: `hashicorp/vault-action` (JWT, role bound to repo + ref) → `cosign sign --recursive` + `cosign attest --type slsaprovenance1` (+ `spdxjson`) with `--key hashivault://<org>-ci-images`, **no transparency log**; then a round-trip verify with the exported public key | `cosign verify --key <org>.pub --insecure-ignore-tlog=true <image>@<digest>` and `cosign verify-attestation --key <org>.pub --insecure-ignore-tlog=true --type slsaprovenance1 <image>@<digest>` (the org's public key: `cosign public-key --key hashivault://<org>-ci-images`, or the copy pinned in the cluster) |
-| **private**, no Vault inputs | none (❕) | — | — |
-| any, `attestation-mode: cosign` (opt-in) | cosign keyless (Sigstore) — **writes to the public Rekor log** | `cosign sign` + `cosign attest --type slsaprovenance1` (+ `spdxjson` SBOM) on the digest, OIDC identity = this reusable workflow | `cosign verify --certificate-identity-regexp '^https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@' --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>` |
-
-### The `vault` provenance (what admission checks)
-
-[`actions/docker/vault-sign/provenance.ts`](../../actions/docker/vault-sign/provenance.ts) builds the SLSA v1 predicate
-(GitHub's buildType `https://actions.github.io/buildtypes/workflow/v1`) from the job's **OIDC token
-claims** — the same claims Vault validated before it allowed the sign:
-
-| Field | Value | Source |
-|---|---|---|
-| `runDetails.builder.id` | `https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@<ref the caller pinned>` | claim `job_workflow_ref` — the **reusable** workflow. Not `GITHUB_WORKFLOW_REF` / `github.workflow_ref`: inside a reusable those are the **caller's** workflow (the bug the keyless jq predicate had — planeo-infra SLSA self-assessment E-S5) |
-| `buildDefinition.externalParameters.workflow` | `{repository: https://github.com/<owner>/<repo>, ref: refs/heads/<branch>, path: .github/workflows/<caller>.yaml}` | claims `repository`, `ref`, `workflow_ref` (an object, as the admission CUE expects — not a string) |
-| `resolvedDependencies[0]` | `git+https://github.com/<owner>/<repo>@<ref>` + `gitCommit` | claims `ref`, `sha` |
-
-The planeo-infra `ClusterImagePolicy` `<org>-approved-build` CUE asserts exactly these fields
-(`repository` in the org, `ref` main|develop, `path` a workflow file, `builder.id` this reusable);
-the build and the 🛡️ slsa job evaluate the same CUE with `cosign verify-attestation --policy`.
-Signatures and attestations use the classic `sha256-<digest>.sig` / `.att` tags (cosign v3 needs
-`--use-signing-config=false --new-bundle-format=false` for that and to keep Rekor out — chosen by
-cosign major version).
+| **private** | `none` in the build → the org's Vault Transit key in [`docker-image-attest.yaml`](#sign-with-the-orgs-key-build--scan--attest) | `cosign sign` + `cosign attest --type slsaprovenance1` (+ `spdxjson`), no Rekor, builder identity from `build_identity` | `cosign verify --key <org>.pub --insecure-ignore-tlog=true <image>@<digest>` + `cosign verify-attestation --type slsaprovenance1` (what the clusters' policy-controller does) |
+| private, `attestation-mode: cosign` (opt-in) | cosign keyless (Sigstore, **public Rekor**) | `cosign sign` + `cosign attest` with this workflow's OIDC identity | `cosign verify --certificate-identity-regexp '^https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@' --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>` |
 
 **Why two mechanisms — and do we need to enable anything at the org?** GitHub Artifact
 Attestations on a **private** repository are a **GitHub Enterprise Cloud** feature. There is
 no org-level toggle: on a Team/Free org a private repo simply gets `HTTP 404` from the
 attestations API — the failure in [ohanalabs-ai/vault-mcp-server run 35250882375](https://github.com/ohanalabs-ai/vault-mcp-server/actions/runs/35250882375/job/105305470285),
 while the identical pipeline passes on the public [marcellodesales/mcp-brasil run 35491108003](https://github.com/marcellodesales/mcp-brasil/actions/runs/35491108003).
-Nothing to flip at org level; either move to Enterprise Cloud (then set `attestation-mode: github` or `push-attestations: "true"`) or sign with the org's Vault Transit key (`vault`), which `auto` picks for a private repo that passes `vault-url` + `transit-key`. Keyless cosign is no longer automatic: it would publish private repository identities to the public Rekor log. Both satisfy the platform rule that
+Nothing to flip at org level; either move to Enterprise Cloud (then set `attestation-mode: github` or `push-attestations: "true"`) or sign with the org's own key in
+`docker-image-attest.yaml` (the private-repo default since INTEGRATE-29; keyless cosign stays an explicit opt-in because it publishes to the public Rekor log). Both satisfy the platform rule that
 every `ohanalabs-ai` / `planeodev` image carries verifiable provenance; deployers can
 `WARN`/fail on images that verify with neither command.
 

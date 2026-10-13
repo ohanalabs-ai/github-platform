@@ -1,5 +1,5 @@
 // Self-test for the SLSA provenance builder + the signing decisions —
-// `node --test actions/docker/vault-sign/*.test.ts` (Node 24+, native type stripping; node:test only).
+// `node --test actions/docker/attest/*.test.ts` (Node 24+, native type stripping; node:test only).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BUILD_TYPE, buildProvenance, builderId, claimsFrom, decodeJwtClaims, isExpectedBuilder, workflowPath } from "./provenance.ts";

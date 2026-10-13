@@ -1,0 +1,241 @@
+# 🔏 docker-image-attest — attest an image DIGEST with the org's Vault Transit key (cosign
+# `hashivault://<org>-ci-images`), NO transparency log, and verify the round trip with the exported
+# public key. The signing step of the vionix supply chain, separate from the build (the builder,
+# docker-multiarch-cicd.yaml, only needs registry credentials):
+#
+#   build (docker-multiarch-cicd.yaml) ──image_ref + build_identity──► scan (docker-image-security.yaml)
+#                                                                   └► attest (THIS, mode provenance)
+#   vendor image (not built by us) ──► scan ──► attest (THIS, mode vuln — INTEGRATE-31, key <org>-image-scan)
+#
+# mode provenance: SLSA v1 provenance whose identity is the BUILD job's (input build-identity = the
+#   builder's `build_identity` output: its OIDC claims, job_workflow_ref = docker-multiarch-cicd.yaml —
+#   the builder.id the clusters' admission CUE asserts). This job's own OIDC token must name the same
+#   repository, commit, ref and run, so a caller cannot feed a foreign identity in. + `cosign sign
+#   --recursive` + an SPDX SBOM attestation.
+# mode vuln: a scan result (artifact) as a `vuln` attestation.
+#
+# Vault: GitHub OIDC → JWT role (default gha-<org>-image-signer: org-wide, bound to the org's
+# numeric id + main|develop + push|workflow_dispatch, NO job_workflow_ref — so this reusable can
+# sign; planeo-infra vault/clusters/*/github-actions) → token as a step output, revoked at the end.
+# Tailnet: Vault is tailnet-only for our orgs — join-tailscale with the org's Tailscale OIDC
+# federated identity (vars.TS_FEDERATED_CLIENT_ID / vars.TS_FEDERATED_AUDIENCE): no secret anywhere.
+# pull_request runs never sign. All logic: actions/docker/attest/*.ts (github-script, no npm).
+name: 🔏 docker-image-attest
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: The image to attest, pinned by digest (<registry>/<repo>@sha256:<hex>) — the builder's `image_ref`.
+        type: string
+        required: true
+      mode:
+        description: "provenance (build provenance + signature + SBOM) | vuln (a scan result)"
+        type: string
+        default: provenance
+      build-identity:
+        description: "mode provenance: the builder's `build_identity` output (base64 JSON of its OIDC claims)"
+        type: string
+        default: ""
+      vuln-predicate-artifact:
+        description: "mode vuln: name of the artifact holding the scan result (uploaded by the scan job)"
+        type: string
+        default: ""
+      vuln-predicate-path:
+        description: "mode vuln: path of the scan result file inside that artifact"
+        type: string
+        default: ""
+      sbom:
+        description: "mode provenance: also attest an SPDX SBOM (Syft)"
+        type: boolean
+        default: true
+      registry:
+        description: Registry to log in to (cosign pushes signatures/attestations next to the image).
+        type: string
+        default: ghcr.io
+      cosign-repository:
+        description: Optional repository for signatures/attestations (COSIGN_REPOSITORY) — for images we cannot push to.
+        type: string
+        default: ""
+      vault-url:
+        description: Vault address (tailnet-only for our orgs → also join-tailscale).
+        type: string
+        required: true
+      vault-auth-path:
+        description: JWT auth mount bound to GitHub's OIDC issuer.
+        type: string
+        default: github-jwt
+      vault-role:
+        description: JWT role carrying ci-image-signer-<org>. Default = the org-wide role.
+        type: string
+        default: gha-${{ github.repository_owner }}-image-signer
+      vault-jwt-audience:
+        description: "`aud` of the GitHub OIDC token — must be in the role's bound_audiences."
+        type: string
+        default: https://github.com/${{ github.repository_owner }}
+      vault-ca-cert:
+        description: Optional base64 PEM CA bundle for a Vault behind a private CA.
+        type: string
+        default: ""
+      transit-key:
+        description: Transit key — one per org (<org>-ci-images; <org>-image-scan for vendor vuln stamps, INTEGRATE-31).
+        type: string
+        default: ${{ github.repository_owner }}-ci-images
+      transit-path:
+        description: Transit mount path.
+        type: string
+        default: transit
+      signing-refs:
+        description: Refs whose runs may sign (exact or trailing-* prefix). pull_request events never sign.
+        type: string
+        default: refs/heads/main,refs/heads/develop
+      signer-workflow:
+        description: The builder reusable the provenance must name (the admission CUE's builder).
+        type: string
+        default: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml
+      join-tailscale:
+        description: Join the tailnet before the Vault login (Vault is tailnet-only for our orgs).
+        type: boolean
+        default: false
+      tailscale-oauth-client-id:
+        description: Tailscale OIDC federated identity client id — pass vars.TS_FEDERATED_CLIENT_ID (not a secret).
+        type: string
+        default: ""
+      tailscale-audience:
+        description: Its audience — pass vars.TS_FEDERATED_AUDIENCE (not a secret).
+        type: string
+        default: ""
+      tailscale-tags:
+        description: Node tags (granted by the federated identity).
+        type: string
+        default: tag:ci
+      runs-on:
+        description: Runner label.
+        type: string
+        default: ubuntu-latest
+    outputs:
+      signed:
+        description: '"true" when the digest was attested and the round trip verified'
+        value: ${{ jobs.attest.outputs.signed }}
+      key-ref:
+        description: hashivault://<transit-key>
+        value: ${{ jobs.attest.outputs.key-ref }}
+      public-key-b64:
+        description: The Transit key's PUBLIC half (base64 PEM), for verification without Vault
+        value: ${{ jobs.attest.outputs.public-key-b64 }}
+      builder-id:
+        description: runDetails.builder.id of the provenance (mode provenance)
+        value: ${{ jobs.attest.outputs.builder-id }}
+
+run-name: 🔏 attest ${{ inputs.image }}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  attest:
+    name: 🔏 attest (${{ inputs.mode }})
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      signed: ${{ steps.attest.outputs.signed }}
+      key-ref: ${{ steps.attest.outputs.key-ref }}
+      public-key-b64: ${{ steps.attest.outputs.public-key-b64 }}
+      builder-id: ${{ steps.attest.outputs.builder-id }}
+      reason: ${{ steps.attest.outputs.reason }}
+    steps:
+      - name: Load the helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .docker-attest
+          sparse-checkout: |
+            actions/docker/attest
+            actions/network/tailscale/join
+          persist-credentials: false
+
+      - name: 🌐 join the tailnet (secretless — Tailscale OIDC federated identity)
+        if: inputs.join-tailscale && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+        uses: ./.docker-attest/actions/network/tailscale/join
+        with:
+          oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+          audience: ${{ inputs.tailscale-audience }}
+          tags: ${{ inputs.tailscale-tags }}
+
+      - name: Log in to ${{ inputs.registry }} (cosign pushes the signature + attestations)
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch the scan result (mode vuln)
+        if: inputs.mode == 'vuln' && inputs.vuln-predicate-artifact != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.vuln-predicate-artifact }}
+          path: ${{ runner.temp }}/vuln-predicate
+
+      - name: 🔏 attest with the Vault Transit key (no Rekor) + verify the round trip
+        id: attest
+        uses: ./.docker-attest/actions/docker/attest
+        with:
+          subject: ${{ inputs.image }}
+          mode: ${{ inputs.mode }}
+          build-identity: ${{ inputs.build-identity }}
+          vuln-predicate: ${{ inputs.mode == 'vuln' && format('{0}/vuln-predicate/{1}', runner.temp, inputs.vuln-predicate-path) || '' }}
+          cosign-repository: ${{ inputs.cosign-repository }}
+          sbom: ${{ inputs.sbom && 'true' || 'false' }}
+          vault-url: ${{ inputs.vault-url }}
+          vault-auth-path: ${{ inputs.vault-auth-path }}
+          vault-role: ${{ inputs.vault-role }}
+          vault-jwt-audience: ${{ inputs.vault-jwt-audience }}
+          vault-ca-cert: ${{ inputs.vault-ca-cert }}
+          transit-key: ${{ inputs.transit-key }}
+          transit-path: ${{ inputs.transit-path }}
+          signing-refs: ${{ inputs.signing-refs }}
+          signer-workflow: ${{ inputs.signer-workflow }}
+          join-tailscale: "false" # joined above with the federated identity
+
+  verify:
+    # Independent re-verification with NO Vault access — the exported public key + the registry
+    # only, exactly what the clusters' admission does (signature + provenance + approved-build CUE).
+    name: 🛡️ verify (public key only)
+    needs: attest
+    if: inputs.mode == 'provenance' && needs.attest.outputs.signed == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Load the helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .docker-attest
+          sparse-checkout: actions/docker/attest
+          persist-credentials: false
+
+      - name: Log in to ${{ inputs.registry }}
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🧰 install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: 🛡️ cosign verify + verify-attestation (approved-build CUE)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SUBJECT: ${{ inputs.image }}
+          SIGNED: ${{ needs.attest.outputs.signed }}
+          PUBLIC_KEY_B64: ${{ needs.attest.outputs.public-key-b64 }}
+          KEY_REF: ${{ needs.attest.outputs.key-ref }}
+          ORG: ${{ github.repository_owner }}
+          SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
+          TITLE: SLSA verification (Vault Transit key, no Vault access)
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.docker-attest/actions/docker/attest/verify.ts`);
+            await run({ core, exec, github, context });

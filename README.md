@@ -8,7 +8,7 @@ Reusable GitHub Actions workflows for organization-wide automation. (Formerly
 
 Each reusable workflow has its own usage doc under `products/`:
 
-- [`products/devsecops-docker/`](products/devsecops-docker/README.md) — `docker-multiarch-cicd.yaml`
+- [`products/devsecops-docker/`](products/devsecops-docker/README.md) — `docker-multiarch-cicd.yaml` · `docker-image-attest.yaml` (sign + attest with the org's Vault Transit key)
 - [`products/devsecops-terraform/`](products/devsecops-terraform/README.md) — `terraform-devsecops-workflow.yaml`
 - [`products/devsecops-github/`](products/devsecops-github/README.md) — GitHub repo-hygiene workflows (multiple capabilities, one per file under its own `capabilities/`), e.g. `github-team-codeowners-actions.yaml`
 - [`products/devsecops-gitops/`](products/devsecops-gitops/README.md) — `gitops-argocd-group.yaml` + `gitops-argocd-gate.yaml`: per-ArgoCD-Application rendered diff (kustomize / render plugin / `helm template` for multi-source apps), live `argocd app diff` verdicts (a no-op cannot merge), sticky PR comments, post-merge validation + GitHub Deployments; built from the composite actions under [`actions/gitops/`](actions/README.md)
@@ -42,7 +42,7 @@ jobs:
       docker-compose-file-name: docker-compose.yaml
       dockerhub-registry: docker.io
       dockerhub-namespace: ${{ github.repository_owner }}
-      # attestation-mode: auto  # public repo → GitHub attestations, private repo → vault (with vault-url + transit-key) else none (see products/devsecops-docker)
+      # attestation-mode: auto  # public repo → GitHub attestations, private repo → cosign keyless (see products/devsecops-docker)
     secrets: inherit
 ```
 
@@ -54,5 +54,5 @@ jobs:
 - `docker-compose-file-name` (default: `docker-compose.yaml`)
 - `dockerhub-registry` (default: `docker.io`)
 - `dockerhub-namespace` (default: `${{ github.repository_owner }}`)
-- `attestation-mode` (default: `auto`) — public repo → GitHub attestations; private repo → `vault` (our Vault Transit key via `vault-url` + `vault-role` + `transit-key`, no Rekor) else `none`; `github` / `vault` / `cosign` (keyless — explicit opt-in, writes to the PUBLIC Rekor log) / `none` to force
+- `attestation-mode` (default: `auto`) — public repo → GitHub attestations, private repo → cosign keyless; `github` / `cosign` / `none` to force
 - `push-attestations` (default: `"false"`) — legacy override forcing GitHub attestations

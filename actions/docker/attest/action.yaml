@@ -1,17 +1,37 @@
-# 🔏 docker/vault-sign — sign + attest an image DIGEST with the org's Vault Transit key
-# (cosign `hashivault://<key>`), no transparency log, provenance from the job's OIDC claims, and a
-# round-trip verification with the exported public key. Used by the ref/release build jobs of
-# .github/workflows/docker-multiarch-cicd.yaml (attestation-mode: vault). See README.md.
+# 🔏 docker/attest — attest an image DIGEST with the org's Vault Transit key (cosign
+# `hashivault://<key>`), no transparency log, and prove the round trip with the exported public key.
+# Used by .github/workflows/docker-image-attest.yaml (products/devsecops-docker). See README.md.
 #
-# Flow: plan.ts (sign? never on pull_request; only signing-refs) → [tailnet join] → hashicorp/vault-action
-# (method jwt, GitHub OIDC; token kept as a step OUTPUT, never exported to the job env) → cosign →
-# SBOM (Syft) → sign.ts (cosign sign --recursive + attest slsaprovenance1 + spdxjson, verify, revoke token).
-name: docker-vault-sign
-description: "Sign + attest an image digest with a Vault Transit key (cosign hashivault://), no Rekor, SLSA v1 provenance from the OIDC claims"
+#   mode provenance  SLSA v1 provenance built from the BUILD job's identity (docker-multiarch-cicd.yaml
+#                    output `build_identity`), bound to this job's own OIDC token (same repo/commit/run)
+#                    + `cosign sign --recursive` (+ SPDX SBOM attestation)
+#   mode vuln        a scan result as a `vuln` attestation (the security gate's stamp; INTEGRATE-31)
+#
+# Flow: plan.ts (sign? never on pull_request; only signing-refs) → [tailnet join, federated identity]
+# → hashicorp/vault-action (method jwt, GitHub OIDC; token kept as a step OUTPUT, never exported to
+# the job env) → cosign → [Syft SBOM] → sign.ts (attest, verify, revoke the token).
+name: docker-attest
+description: "Attest an image digest (SLSA provenance or a vuln scan) with a Vault Transit key (cosign hashivault://), no Rekor"
 inputs:
   subject:
-    description: "<image>@sha256:<digest> to sign"
+    description: "<image>@sha256:<digest> to attest"
     required: true
+  mode:
+    description: "provenance (SLSA v1 from build-identity + signature + SBOM) | vuln (vuln-predicate)"
+    required: false
+    default: provenance
+  build-identity:
+    description: "mode provenance: the build job's identity — docker-multiarch-cicd.yaml output `build_identity`"
+    required: false
+    default: ""
+  vuln-predicate:
+    description: "mode vuln: path of the scan result to attest (cosign --type vuln predicate)"
+    required: false
+    default: ""
+  cosign-repository:
+    description: "Optional repository for signatures/attestations (COSIGN_REPOSITORY) — for images we cannot push to"
+    required: false
+    default: ""
   vault-url:
     description: "Vault address (e.g. https://vault.platform.planeo.dev — tailnet-only: set join-tailscale)"
     required: true
@@ -46,7 +66,7 @@ inputs:
     required: false
     default: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml
   sbom:
-    description: "Also generate (Syft) and attest an SPDX SBOM"
+    description: "mode provenance: also generate (Syft) and attest an SPDX SBOM"
     required: false
     default: "true"
   join-tailscale:
@@ -76,7 +96,7 @@ inputs:
     default: ""
 outputs:
   signed:
-    description: "true when the digest was signed + attested and the round trip verified"
+    description: "true when the digest was attested and the round trip verified"
     value: ${{ steps.sign.outputs.signed || 'false' }}
   reason:
     description: "Why the run signed or did not"
@@ -144,26 +164,30 @@ runs:
       uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
     - name: 📦 SBOM (Syft, SPDX JSON)
-      if: steps.plan.outputs.sign == 'true' && inputs.sbom == 'true'
+      if: steps.plan.outputs.sign == 'true' && inputs.sbom == 'true' && inputs.mode == 'provenance'
       uses: anchore/sbom-action@f5e124a5e5e1d497a692818ae907d3c45829d033 # v0.17.3
       with:
         image: ${{ inputs.subject }}
-        output-file: ${{ runner.temp }}/vault-sign-sbom.spdx.json
+        output-file: ${{ runner.temp }}/attest-sbom.spdx.json
         upload-artifact: false
 
-    - name: 🔏 sign + attest (Vault Transit, no Rekor) and verify the round trip
+    - name: 🔏 attest (Vault Transit, no Rekor) and verify the round trip
       id: sign
       if: steps.plan.outputs.sign == 'true'
       uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
       env:
         HELPERS: ${{ github.action_path }}
         SUBJECT: ${{ inputs.subject }}
+        MODE: ${{ inputs.mode }}
+        BUILD_IDENTITY: ${{ inputs.build-identity }}
+        VULN_PREDICATE: ${{ inputs.vuln-predicate }}
+        COSIGN_REPOSITORY: ${{ inputs.cosign-repository }}
         TRANSIT_KEY: ${{ inputs.transit-key }}
         TRANSIT_PATH: ${{ inputs.transit-path }}
         VAULT_ADDR: ${{ inputs.vault-url }}
         VAULT_TOKEN: ${{ steps.vault.outputs.vault_token }}
         VAULT_CACERT: ${{ steps.plan.outputs.ca-file }}
-        SBOM_FILE: ${{ inputs.sbom == 'true' && format('{0}/vault-sign-sbom.spdx.json', runner.temp) || '' }}
+        SBOM_FILE: ${{ inputs.sbom == 'true' && inputs.mode == 'provenance' && format('{0}/attest-sbom.spdx.json', runner.temp) || '' }}
         SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
         OIDC_AUDIENCE: ${{ inputs.vault-jwt-audience }}
         ORG: ${{ github.repository_owner }}

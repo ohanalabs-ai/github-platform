@@ -23,13 +23,13 @@ export function refMatches(ref: string, patterns: string[]): boolean {
 /**
  * Sign only from a trusted build: never a pull_request (untrusted code; the PR role is read-only and
  * the Vault role binds `ref`, so it would 403 anyway), only refs the caller lists (default main /
- * develop — the refs the admission CUE accepts and the per-repo Vault roles are bound to).
+ * develop — the refs the admission CUE accepts and the org-wide Vault roles are bound to).
  * Missing configuration is an error, not a silent skip: the caller asked for attestation-mode vault.
  */
 export function decide(i: SignInputs): Decision {
   const missing = ([["vault-url", i.vaultUrl], ["vault-role", i.vaultRole], ["transit-key", i.transitKey]] as const)
     .filter(([, v]) => !v.trim()).map(([k]) => k);
-  if (missing.length) throw new Error(`attestation-mode vault needs input(s): ${missing.join(", ")}`);
+  if (missing.length) throw new Error(`Vault attestation needs input(s): ${missing.join(", ")}`);
   if (i.eventName === "pull_request" || i.eventName === "pull_request_target") {
     return { sign: false, reason: `${i.eventName} events never sign (untrusted code); the push build of the merge signs` };
   }
