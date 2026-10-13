@@ -3,11 +3,16 @@
 # Build provenance (see the attestation-mode input + ATTEST_MODE env below):
 #   * PUBLIC caller repos  -> GitHub Artifact Attestations (actions/attest-build-provenance,
 #     pushed to the registry; consumers verify with `gh attestation verify`).
-#   * PRIVATE caller repos -> cosign keyless (Sigstore): `cosign sign` + `cosign attest
-#     --type slsaprovenance1` with this workflow's OIDC identity; consumers verify with
+#   * PRIVATE caller repos -> `none` here: this workflow BUILDS; signing with the org's own key is
+#     a separate job, .github/workflows/docker-image-attest.yaml (Vault Transit, no Rekor), fed by
+#     this workflow's outputs `image_ref` + `build_identity` (the build job's OIDC identity: its
+#     job_workflow_ref is the builder.id the clusters' admission CUE asserts). Compose:
+#     build → scan (docker-image-security.yaml) → attest. products/devsecops-docker/README.md.
+#   * `cosign` (keyless Sigstore) is an EXPLICIT opt-in only: it writes the private repository's
+#     name, workflow and digests to the PUBLIC Rekor transparency log. Consumers verify with
 #     `cosign verify --certificate-identity-regexp '^https://github.com/<signer-workflow>@'
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com`.
-#     Why: GitHub Artifact Attestations on private repositories exist only on GitHub
+#     Why not GitHub attestations for private repos: GitHub Artifact Attestations on private repositories exist only on GitHub
 #     Enterprise Cloud — there is NO org-level toggle to enable; a private repo just gets
 #     HTTP 404 from the attestations API (ohanalabs-ai/vault-mcp-server run 35250882375),
 #     while the same pipeline passes on a public repo (marcellodesales/mcp-brasil run
@@ -85,9 +90,11 @@ on:
         description: >-
           How the image digest gets verifiable build provenance.
           auto (default): public repo -> GitHub attestations (gh attestation verify);
-          private repo -> cosign keyless (Sigstore, cosign verify), because GitHub
-          Artifact Attestations for private repos require GitHub Enterprise Cloud.
-          github: force GitHub attestations. cosign: force cosign keyless.
+          private repo -> none here (GitHub Artifact Attestations for private repos require
+          GitHub Enterprise Cloud) — sign with the org's key in a following
+          docker-image-attest.yaml job instead. github: force GitHub attestations.
+          cosign: EXPLICIT opt-in to Sigstore keyless — writes the repo/workflow/digest to the
+          PUBLIC Rekor transparency log; never the default.
           none: skip provenance (the slsa job reports "not attested" and does not fail).
         required: false
         type: string
@@ -138,6 +145,17 @@ on:
       image_digest:
         description: Digest (sha256:…) of the image this run built (PR, ref or release build). Empty when nothing was built.
         value: ${{ jobs.pr-build.outputs.image_digest || jobs.ref-build.outputs.image_digest || jobs.release-build.outputs.image_digest }}
+      build_identity:
+        description: >-
+          The ref/release build job's identity for provenance: base64(JSON) of its GitHub OIDC claims
+          (repository, ref, sha, workflow_ref, job_workflow_ref = THIS reusable, run_id, …) — never the
+          token. Pass it with image_ref to docker-image-attest.yaml (mode provenance), which binds it
+          to its own token (same repository, commit, ref and run). Empty for PR builds and when the
+          caller did not grant `id-token: write`.
+        value: ${{ jobs.ref-build.outputs.build_identity || jobs.release-build.outputs.build_identity }}
+      builder_id:
+        description: The builder.id the provenance will carry (https://github.com/<this reusable>@<ref>). Empty when build_identity is.
+        value: ${{ jobs.ref-build.outputs.builder_id || jobs.release-build.outputs.builder_id }}
 
 # Set of permissions needed by the workflow
 permissions:
@@ -165,10 +183,11 @@ env:
   #             a private repo simply gets HTTP 404 from the attestations API).
   #   cosign -> Sigstore keyless: `cosign sign` + `cosign attest --type slsaprovenance1` on the
   #             digest with this reusable workflow's OIDC identity; verified with `cosign verify`.
-  #             Works for private repos on any GitHub plan. Chosen automatically for private repos.
+  #             EXPLICIT opt-in only (public Rekor log). Private repos default to `none` and sign
+  #             with the org's Vault key in docker-image-attest.yaml (outputs image_ref + build_identity).
   #   none   -> no provenance; the 🛡️ slsa job reports it and does not fail.
   # push-attestations "true" is the legacy override that forces `github` regardless of visibility.
-  ATTEST_MODE: ${{ inputs.attestation-mode != '' && inputs.attestation-mode != 'auto' && inputs.attestation-mode || (inputs.push-attestations == 'true' && 'github') || (github.event.repository.visibility == 'private' && 'cosign') || 'github' }}
+  ATTEST_MODE: ${{ inputs.attestation-mode != '' && inputs.attestation-mode != 'auto' && inputs.attestation-mode || (inputs.push-attestations == 'true' && 'github') || (github.event.repository.visibility == 'private' && 'none') || 'github' }}
   # Derived: GitHub-native attestations are produced (and pushed) only in github mode.
   PUSH_ATTESTATIONS: ${{ (inputs.attestation-mode == 'github' || (inputs.attestation-mode != 'cosign' && inputs.attestation-mode != 'none' && (inputs.push-attestations == 'true' || github.event.repository.visibility != 'private'))) && 'true' || 'false' }}
 
@@ -592,6 +611,8 @@ jobs:
       image_digest: ${{ steps.ref_build.outputs.digest }}
       image_ref: ${{ steps.ref_build.outputs.digest && format('{0}@{1}', steps.ref_build.outputs.image-base, steps.ref_build.outputs.digest) || '' }}
       image_subject: ${{ steps.ref_build.outputs.subject }}
+      build_identity: ${{ steps.build_identity.outputs.build-identity }}
+      builder_id: ${{ steps.build_identity.outputs.builder-id }}
       report_title: SLSA verification (merge/ref build)
       pr_number: ${{ steps.build_vars.outputs.pr_number }}
       comment_enabled: ${{ steps.build_vars.outputs.comment_enabled }}
@@ -731,6 +752,25 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-ref.spdx.json
 
+      # AFTER the build: the helper checkout sits in the workspace and must never be part of the
+      # Docker build context (a `COPY . .` would ship it in the image).
+      - name: Load the build-identity helper (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .docker-attest
+          sparse-checkout: actions/docker/attest
+          persist-credentials: false
+
+      - name: 🪪 build identity (OIDC claims for docker-image-attest.yaml)
+        id: build_identity
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.docker-attest/actions/docker/attest/identity.ts`);
+            await run({ core, exec, github, context });
+
       - name: Install cosign (private repo → Sigstore keyless provenance)
         if: env.ATTEST_MODE == 'cosign'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -831,6 +871,8 @@ jobs:
       image_digest: ${{ steps.release_ref_build.outputs.digest }}
       image_ref: ${{ steps.release_ref_build.outputs.digest && format('{0}@{1}', steps.release_ref_build.outputs.image-base, steps.release_ref_build.outputs.digest) || '' }}
       image_subject: ${{ steps.release_ref_build.outputs.subject }}
+      build_identity: ${{ steps.build_identity.outputs.build-identity }}
+      builder_id: ${{ steps.build_identity.outputs.builder-id }}
       report_title: SLSA verification (release build)
     steps:
       - name: Checkout
@@ -925,6 +967,25 @@ jobs:
           push-attestations: ${{ env.PUSH_ATTESTATIONS }}
           sbom-file: sbom-tag.spdx.json
           push-latest: true
+
+      # AFTER the build: the helper checkout sits in the workspace and must never be part of the
+      # Docker build context (a `COPY . .` would ship it in the image).
+      - name: Load the build-identity helper (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .docker-attest
+          sparse-checkout: actions/docker/attest
+          persist-credentials: false
+
+      - name: 🪪 build identity (OIDC claims for docker-image-attest.yaml)
+        id: build_identity
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.docker-attest/actions/docker/attest/identity.ts`);
+            await run({ core, exec, github, context });
 
       - name: Install cosign (private repo → Sigstore keyless provenance)
         if: env.ATTEST_MODE == 'cosign'

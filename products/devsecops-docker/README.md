@@ -24,7 +24,7 @@ jobs:
       docker-compose-file-name: docker-compose.yaml
       dockerhub-registry: docker.io
       dockerhub-namespace: ${{ github.repository_owner }}
-      # attestation-mode: auto   # default — public repo: GitHub attestations; private repo: cosign keyless
+      # attestation-mode: auto   # default — public repo: GitHub attestations; private repo: none here → docker-image-attest.yaml
     secrets: inherit
 ```
 
@@ -46,7 +46,7 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 | `dockerhub-namespace` | `${{ github.repository_owner }}` | Optional Docker Hub namespace for release mirroring |
 | `dockerhub-registry-username` | *(none)* | Optional Docker Hub username, for mirroring a release build |
 | `dockerhub-registry-token` | *(none)* | Optional Docker Hub token, for mirroring a release build — pass as `${{ secrets.DOCKERHUB_TOKEN }}` from the caller |
-| `attestation-mode` | `auto` | How the image gets verifiable provenance: `auto` (public repo → GitHub attestations, private repo → cosign keyless), `github`, `cosign`, `none` |
+| `attestation-mode` | `auto` | How the image gets verifiable provenance **in the build**: `auto` (public repo → GitHub attestations; private repo → `none` — sign with the org's key in a following [`docker-image-attest.yaml`](#sign-with-the-orgs-key-build--scan--attest) job), `github`, `cosign` (**explicit opt-in only: keyless Sigstore writes the private repo's name, workflow and digests to the PUBLIC Rekor log**), `none` |
 | `push-attestations` | `"false"` | Legacy override: `"true"` forces GitHub attestations regardless of visibility (only works where GitHub Artifact Attestations exist) |
 | `slsa-build-level` | *(none)* | Target SLSA build level for provenance generation |
 | `slsa-signer-workflow` | *(none)* | Reusable workflow identity used to verify artifact attestations with `gh attestation verify` |
@@ -59,6 +59,8 @@ Use `secrets: inherit` in the caller (as in the example above) rather than decla
 |---|---|---|
 | `image_ref` | PR, ref or release build | Digest-pinned reference of the image this run built: `<base>/pr/<N>@sha256:…` on a PR, `<base>@sha256:…` on a branch or tag. Empty when nothing was built (closed PR) |
 | `image_digest` | PR, ref or release build | The `sha256:…` digest of that image |
+| `build_identity` | ref or release build | The build job's identity for provenance: base64(JSON) of its GitHub OIDC claims (`repository`, `ref`, `sha`, `workflow_ref`, `job_workflow_ref` = this reusable, `run_id`, …) — never the token. Feed it with `image_ref` to `docker-image-attest.yaml`. Empty on PR builds or without `id-token: write` |
+| `builder_id` | ref or release build | The `builder.id` the provenance will carry (`https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@<ref>`) |
 | `image_tag`, `image_base`, `short_sha`, `effective_ref` | ref build only | Unchanged legacy outputs of the branch build |
 
 ## Compose an image scan after the build
@@ -103,20 +105,78 @@ goes red there (shift-left). An empty `image_ref` (closed PR) is handled by the 
 2. Registry credentials available to the caller — either the default `GITHUB_TOKEN` for `ghcr.io` (already permitted via `secrets: inherit`), or explicit Docker Hub credentials if mirroring there.
 3. For SLSA attestation: the repo's Actions permissions must allow `id-token: write` and `attestations: write` (set in the caller's `permissions:` block, not this reusable workflow's own — a caller must grant them explicitly per GitHub's reusable-workflow permission model).
 
+## Sign with the org's key: build → scan → attest
+
+The builder only needs registry credentials. Signing is its own reusable,
+[`docker-image-attest.yaml`](../../.github/workflows/docker-image-attest.yaml) (Jira INTEGRATE-29):
+cosign `--key hashivault://<org>-ci-images` (Vault Transit — the private key never leaves Vault),
+**no transparency log**, a round-trip verification with the exported public key, and an independent
+🛡️ verify job with no Vault access. It needs the build's `image_ref` and `build_identity`:
+
+```yaml
+permissions: { contents: write, packages: write, id-token: write, attestations: write, artifact-metadata: write, pull-requests: write }
+jobs:
+  docker:
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+    with: { docker-compose-file-name: docker-compose.yaml }   # private repo → attestation-mode auto = none
+    secrets: inherit
+  scan:
+    needs: docker
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-security.yaml@main
+    with: { image: "${{ needs.docker.outputs.image_ref }}" }
+  attest:
+    needs: [docker, scan]
+    if: needs.docker.outputs.build_identity != ''        # PR builds never sign
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-attest.yaml@main
+    permissions: { contents: read, packages: write, id-token: write }
+    with:
+      image: ${{ needs.docker.outputs.image_ref }}
+      build-identity: ${{ needs.docker.outputs.build_identity }}
+      vault-url: https://vault.platform.planeo.dev
+      join-tailscale: true                                     # Vault is tailnet-only
+      tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}   # identifiers, not secrets
+      tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
+      # vault-role / transit-key default to gha-<org>-image-signer / <org>-ci-images
+```
+
+**Why the provenance names the BUILD workflow.** The clusters' admission CUE (planeo-infra
+`clusters/base/hooks/policy/clusterimagepolicy-<org>.yaml`) asserts `builder.id` =
+`docker-multiarch-cicd.yaml@…`. The attest job runs as a different reusable, so its own OIDC
+`job_workflow_ref` is never the builder: the build job captures its identity (`build_identity`) and
+the attest job **binds** it to its own token — same repository, commit, ref and run — before writing
+it into the predicate. A caller cannot feed a foreign identity in. The org-wide Vault role
+(`gha-<org>-image-signer`, planeo-infra #399) binds the org's numeric id, the branch and the event,
+**not** `job_workflow_ref`, so this reusable is allowed to sign.
+
+**Vendor images** (not built by us — INTEGRATE-31, future): scan → attest with `mode: vuln`
+(`vuln-predicate-artifact` + `vuln-predicate-path` from the scan job, `transit-key: <org>-image-scan`,
+`cosign-repository` when we cannot push next to the image).
+
+| `docker-image-attest.yaml` input | Default | |
+|---|---|---|
+| `image` | — | `<registry>/<repo>@sha256:…` (the builder's `image_ref`) |
+| `mode` | `provenance` | `provenance` (signature + SLSA v1 + SPDX SBOM) · `vuln` (a scan result) |
+| `build-identity` | `""` | the builder's `build_identity` (mode provenance) |
+| `vault-url` / `vault-role` / `transit-key` | — / `gha-<owner>-image-signer` / `<owner>-ci-images` | Vault login + key |
+| `join-tailscale` + `tailscale-oauth-client-id` + `tailscale-audience` | `false` | secretless tailnet join (org variables `TS_FEDERATED_*`) |
+| `signing-refs` | `refs/heads/main,refs/heads/develop` | refs whose runs may sign; `pull_request` never signs |
+| outputs | | `signed`, `key-ref`, `public-key-b64`, `builder-id` |
+
 ## Build provenance: public vs private repositories
 
 | Caller repo | Mechanism (`attestation-mode: auto`) | Produced in the build job | Consumers verify with |
 |---|---|---|---|
 | **public** | GitHub Artifact Attestations | `actions/attest-build-provenance` + `attest-sbom`, pushed to GHCR | `gh attestation verify oci://<image>@<digest> --repo <owner/repo> --signer-workflow ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml` |
-| **private** | cosign keyless (Sigstore) | `cosign sign` + `cosign attest --type slsaprovenance1` (+ `spdxjson` SBOM) on the digest, OIDC identity = this reusable workflow | `cosign verify --certificate-identity-regexp '^https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@' --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>` |
+| **private** | `none` in the build → the org's Vault Transit key in [`docker-image-attest.yaml`](#sign-with-the-orgs-key-build--scan--attest) | `cosign sign` + `cosign attest --type slsaprovenance1` (+ `spdxjson`), no Rekor, builder identity from `build_identity` | `cosign verify --key <org>.pub --insecure-ignore-tlog=true <image>@<digest>` + `cosign verify-attestation --type slsaprovenance1` (what the clusters' policy-controller does) |
+| private, `attestation-mode: cosign` (opt-in) | cosign keyless (Sigstore, **public Rekor**) | `cosign sign` + `cosign attest` with this workflow's OIDC identity | `cosign verify --certificate-identity-regexp '^https://github.com/ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@' --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>` |
 
 **Why two mechanisms — and do we need to enable anything at the org?** GitHub Artifact
 Attestations on a **private** repository are a **GitHub Enterprise Cloud** feature. There is
 no org-level toggle: on a Team/Free org a private repo simply gets `HTTP 404` from the
 attestations API — the failure in [ohanalabs-ai/vault-mcp-server run 35250882375](https://github.com/ohanalabs-ai/vault-mcp-server/actions/runs/35250882375/job/105305470285),
 while the identical pipeline passes on the public [marcellodesales/mcp-brasil run 35491108003](https://github.com/marcellodesales/mcp-brasil/actions/runs/35491108003).
-Nothing to flip at org level; either move to Enterprise Cloud (then set `attestation-mode: github` or `push-attestations: "true"`) or rely on cosign keyless, which this
-pipeline now does automatically for private repos. Both satisfy the platform rule that
+Nothing to flip at org level; either move to Enterprise Cloud (then set `attestation-mode: github` or `push-attestations: "true"`) or sign with the org's own key in
+`docker-image-attest.yaml` (the private-repo default since INTEGRATE-29; keyless cosign stays an explicit opt-in because it publishes to the public Rekor log). Both satisfy the platform rule that
 every `ohanalabs-ai` / `planeodev` image carries verifiable provenance; deployers can
 `WARN`/fail on images that verify with neither command.
 
