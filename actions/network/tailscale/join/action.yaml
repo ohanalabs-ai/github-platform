@@ -15,9 +15,12 @@ inputs:
     required: false
     default: tag:ci
   args:
-    description: Extra `tailscale up` flags
+    description: >-
+      Extra `tailscale up` flags. Do NOT pass --accept-routes: tailscale/github-action v4 always adds
+      it (src/main.ts upArgs), and a second copy makes `tailscale up` fail with "invalid boolean flag
+      accept-routes: flag provided multiple times" (planeodev/planeo-infra run 38454444989).
     required: false
-    default: --accept-routes
+    default: ""
   ping:
     description: Optional comma-separated hosts to ping until reachable (eventual consistency of a new peer)
     required: false
