@@ -69,6 +69,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      # hashicorp/vault-action exportToken exports VAULT_TOKEN only — NOT VAULT_ADDR; the
+      # actions/secrets/vault/* TypeScript reads both (run 38456803148: "VAULT_ADDR must be an
+      # http(s) URL"). Set it once for the job from the input.
+      VAULT_ADDR: ${{ inputs.vault-url }}
     steps:
       - name: 📦 helpers (this reusable's own commit)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
