@@ -130,3 +130,15 @@ org-secret copy — never the key), `cicd-context` (schema, version, plain/seale
 trail, size vs the 900 KiB budget — never a sealed value), `network/tailscale/join` (identity, tags,
 node, tailnet IPs), and a final `📋 run summary` step (`actions/github/run-summary`) with every step's
 outcome. Enforced repo-wide by `actions/github/workflow-summary-lint` (see `actions/README.md`).
+
+## Two classified proofs per image (owner decision 2026-10-13)
+
+| Proof | What it proves | Ledger | Who trusts it |
+|---|---|---|---|
+| 🌐 public provenance | the public build of a PUBLIC repo (GitHub artifact attestation from `docker-multiarch-cicd`) | public Sigstore Rekor | anyone (`gh attestation verify`) |
+| 🔏 Planeo deploy stamp | the digest was scanned and attested with the org's Vault Transit key from a signing ref (`docker-scan-attest`) | none public today; a private Vionix Rekor later (INTEGRATE-32) | Planeo admission |
+
+Every repository adds the deploy stamp as one job after its build — see
+[devsecops-docker → Planeo deploy stamp](../devsecops-docker/README.md#planeo-deploy-stamp-scan--attest--one-job-after-any-build).
+`DESIGN-supply-chain-evidence.md` (github-platform #48, open) should link this classification.
+

@@ -1,0 +1,186 @@
+# 🔏 docker-scan-attest — the PLANEO DEPLOY STAMP, as ONE job any repository adds after its build
+# (owner rule 2026-10-13: "Scan + Attestation is what we need to add to any repository to meet our
+# security posture"). scan (docker-image-security) → attest with the org's Vault Transit key
+# (docker-image-attest: SLSA provenance + SBOM, no public log) → 📋 summary that CLASSIFIES both proofs:
+#
+#   🌐 public provenance   GitHub artifact attestation (public Sigstore / Rekor) — made by the BUILD
+#                          (docker-multiarch-cicd `attestation-mode: auto`) for PUBLIC repos. Kept as is;
+#                          anyone can verify it; Planeo admission does NOT trust it.
+#   🔏 Planeo deploy stamp scan + Vault attestation — what Planeo admission (<org>-approved-build) trusts.
+#
+#   jobs:
+#     build:
+#       uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+#       …
+#     scan-attest:
+#       needs: build
+#       permissions: { contents: read, packages: write, id-token: write, attestations: read, pull-requests: write }
+#       uses: ohanalabs-ai/github-platform/.github/workflows/docker-scan-attest.yaml@main
+#       with:
+#         image: ${{ needs.build.outputs.image_ref }}               # repo@sha256:…
+#         build-identity: ${{ needs.build.outputs.build_identity }}
+#         builder-id: ${{ needs.build.outputs.builder_id }}
+#         tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}
+#         tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
+#
+# Pull requests: scanned (and PR-commented), never stamped — the push build of the merge is. A run on a
+# ref outside `signing-refs` is scanned and reported, not stamped. A push/dispatch on a signing ref that
+# does NOT end with a stamp fails the summary job (the stamp was expected). Severity gate: report-only by
+# default (`severity-threshold: NONE`); set CRITICAL/HIGH to block — a failed gate means no stamp.
+# Secretless: tailnet join via the org's Tailscale OIDC federated identity, Vault login via GitHub OIDC
+# (role gha-<org>-image-signer: the org's numeric id + main|develop + push|workflow_dispatch).
+name: 🔏 docker-scan-attest
+run-name: 🔏 scan + attest ${{ inputs.image }}
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: The built image pinned by digest (repo@sha256:…) — the build's `image_ref`. Empty = nothing built (skips, still summarizes).
+        type: string
+        required: true
+      image-digest:
+        description: Optional explicit sha256 digest (the build's `image_digest`) when `image` is not @sha256-pinned.
+        type: string
+        default: ""
+      build-identity:
+        description: The build job's `build_identity` output (OIDC claims, base64 JSON — never a token). Required to stamp.
+        type: string
+        default: ""
+      builder-id:
+        description: The build's `builder_id` output (shown in the summary).
+        type: string
+        default: ""
+      severity-threshold:
+        description: "Scan gate: NONE (report-only, default) | CRITICAL | HIGH | MEDIUM | LOW. A failed gate = no stamp."
+        type: string
+        default: NONE
+      ignore-unfixed:
+        description: Only findings with a fix count against the threshold.
+        type: boolean
+        default: false
+      add-pr-comment:
+        description: Sticky scan comment on pull_request runs.
+        type: boolean
+        default: true
+      sbom:
+        description: Also attest an SPDX SBOM next to the provenance.
+        type: boolean
+        default: true
+      vault-url:
+        description: Vault address (tailnet-only for the Planeo orgs → keep join-tailscale true).
+        type: string
+        default: https://vault.platform.planeo.dev
+      vault-role:
+        description: "Default: the org-wide gha-<owner>-image-signer."
+        type: string
+        default: ""
+      transit-key:
+        description: "Default: <owner>-ci-images."
+        type: string
+        default: ""
+      signing-refs:
+        description: Refs that get the stamp (comma-separated; exact or trailing-* prefix).
+        type: string
+        default: refs/heads/main,refs/heads/develop
+      join-tailscale:
+        description: Join the tailnet (Tailscale OIDC federated identity) before the Vault login.
+        type: boolean
+        default: true
+      tailscale-oauth-client-id:
+        description: The org variable TS_FEDERATED_CLIENT_ID (an identifier, not a secret).
+        type: string
+        default: ""
+      tailscale-audience:
+        description: The org variable TS_FEDERATED_AUDIENCE (an identifier, not a secret).
+        type: string
+        default: ""
+      runs-on:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      stamped:
+        description: "true when the Planeo deploy stamp (Vault attestation) was produced for this digest"
+        value: ${{ jobs.attest.outputs.signed || 'false' }}
+      key-ref:
+        value: ${{ jobs.attest.outputs.key-ref }}
+      scan-status:
+        value: ${{ jobs.scan.outputs.status }}
+
+jobs:
+  scan:
+    if: inputs.image != ''
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+      pull-requests: write
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-security.yaml@main
+    with:
+      image: ${{ inputs.image }}
+      severity-threshold: ${{ inputs.severity-threshold }}
+      ignore-unfixed: ${{ inputs.ignore-unfixed }}
+      add-pr-comment: ${{ inputs.add-pr-comment }}
+
+  attest:
+    needs: scan
+    # never on pull requests (untrusted code); only after a passing scan; the attest workflow's own plan
+    # step decides the signing ref (non-signing refs report signed=false without touching Vault)
+    if: >-
+      inputs.image != '' && inputs.build-identity != '' && needs.scan.result == 'success'
+      && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-attest.yaml@main
+    with:
+      image: ${{ inputs.image }}
+      mode: provenance
+      build-identity: ${{ inputs.build-identity }}
+      sbom: ${{ inputs.sbom }}
+      vault-url: ${{ inputs.vault-url }}
+      vault-role: ${{ inputs.vault-role != '' && inputs.vault-role || format('gha-{0}-image-signer', github.repository_owner) }}
+      transit-key: ${{ inputs.transit-key != '' && inputs.transit-key || format('{0}-ci-images', github.repository_owner) }}
+      signing-refs: ${{ inputs.signing-refs }}
+      join-tailscale: ${{ inputs.join-tailscale }}
+      tailscale-oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+      tailscale-audience: ${{ inputs.tailscale-audience }}
+      runs-on: ${{ inputs.runs-on }}
+
+  summary:
+    name: 📋 summary (classified proofs)
+    needs: [scan, attest]
+    if: always()
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .scan-attest
+          sparse-checkout: |
+            actions/docker/scan-attest
+            actions/docker/attest
+          persist-credentials: false
+      - name: 📋 classify + render (public provenance vs Planeo deploy stamp)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          IMAGE: ${{ inputs.image }}
+          IMAGE_DIGEST: ${{ inputs.image-digest }}
+          BUILDER_ID: ${{ inputs.builder-id }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SIGNING_REFS: ${{ inputs.signing-refs }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+          THRESHOLD: ${{ inputs.severity-threshold }}
+          REPO: ${{ github.repository }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.scan-attest/actions/docker/scan-attest/summary.ts`);
+            await run({ core, exec, github, context });
