@@ -5,7 +5,7 @@ this document is implemented by this change. It records the decisions so the Vio
 platform (its own Kubernetes cluster and services are being designed next) builds against them.
 
 Related: [`README.md`](README.md) (the CI context envelope),
-[`docker-image-attest.yaml`](../../.github/workflows/docker-image-attest.yaml) (build → scan → attest),
+`docker-image-attest.yaml` (build → scan → attest, in [#44](https://github.com/ohanalabs-ai/github-platform/pull/44)),
 the Planeo side: [`planeodev/planeo-infra` decision `vionix-owns-supply-chain-evidence-planeo-enforces`](https://github.com/planeodev/planeo-infra/blob/develop/knowledge/decisions/vionix-owns-supply-chain-evidence-planeo-enforces.md).
 
 ## 1. Decisions
