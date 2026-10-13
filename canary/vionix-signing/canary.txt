@@ -1,0 +1,1 @@
+vionix signing canary — built by docker-multiarch-cicd.yaml, attested by docker-image-attest.yaml.

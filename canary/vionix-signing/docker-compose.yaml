@@ -1,0 +1,6 @@
+# Build-only compose for the vionix signing canary (docker-multiarch-cicd.yaml bakes this one service).
+services:
+  vionix-signing-canary:
+    build:
+      context: .
+      dockerfile: Dockerfile
