@@ -162,14 +162,44 @@ function parseJsonObject(text: string, what: string): Record<string, unknown> {
   return v as Record<string, unknown>;
 }
 
+// The run summary (owner rule 2026-10-13: every workflow publishes what it did, on every outcome).
+// Section NAMES only — never a sealed value; the size against the job-output budget.
+export interface ContextFacts {
+  mode: string; ok: boolean; error?: string; envelope?: Envelope; fromVersion?: number;
+  sealedSections?: string[]; sealedValues?: number; exported?: boolean;
+}
+export function contextSummaryMarkdown(f: ContextFacts): string {
+  const e = f.envelope;
+  const rows: [string, string][] = [["Outcome", f.ok ? `✅ ${f.mode}` : `❌ ${f.mode} failed`]];
+  if (e) {
+    const bytes = Buffer.byteLength(JSON.stringify(e));
+    rows.push(["Schema", `\`${e.schema}\``]);
+    rows.push(["Version", f.fromVersion !== undefined && f.fromVersion !== e.version ? `v${f.fromVersion} → v${e.version}` : `v${e.version}`]);
+    rows.push(["Plain sections", Object.keys(e.plain || {}).map((k) => `\`${k}\``).join(", ") || "—"]);
+    rows.push(["Size", `${(bytes / 1024).toFixed(1)} KiB of ${(MAX_BYTES / 1024).toFixed(0)} KiB budget (${Math.round((bytes / MAX_BYTES) * 100)}%)`]);
+  }
+  if (f.sealedSections) rows.push(["Sealed sections", f.sealedSections.map((k) => `\`${k}\``).join(", ") || "—"]);
+  if (f.sealedValues !== undefined) rows.push(["Sealed values", `${f.sealedValues} masked${f.exported ? " and exported as env" : ""}`]);
+  if (f.error) rows.push(["Error", f.error.replace(/\|/g, "\\|")]);
+  const md = [`## 🧬 vionix-cicd context — ${f.mode}`, "", "| | |", "|---|---|", ...rows.map(([k, v]) => `| ${k} | ${v} |`), ""];
+  if (e?.trail?.length) {
+    md.push("| Trail · stage | job | attempt | added |", "|---|---|---|---|");
+    for (const t of e.trail) md.push(`| ${t.stage} | ${t.job || "—"} | ${t.runAttempt ?? "—"} | ${(t.added || []).map((a) => `\`${a}\``).join(", ") || "—"} |`);
+    md.push("");
+  }
+  md.push("_Sealed values are never printed — section names only._", "");
+  return md.join("\n");
+}
+
 export default async function run({ core }: Ctx): Promise<void> {
   const env = process.env;
-  const key = (env.CONTEXT_KEY || env.CONFIG_STREAM_KEY || "").trim();
-  if (!key) { core.setFailed("no CONFIG_STREAM_KEY: pass config-stream-key, or run get-config-stream first"); return; }
-  core.setSecret(key);
   const mode = env.MODE || "open";
-  const entry = { stage: env.STAGE || mode, job: env.GITHUB_JOB || "", runAttempt: Number(env.GITHUB_RUN_ATTEMPT || 1) };
+  const f: ContextFacts = { mode, ok: false };
   try {
+    const key = (env.CONTEXT_KEY || env.CONFIG_STREAM_KEY || "").trim();
+    if (!key) throw new Error("no CONFIG_STREAM_KEY: pass config-stream-key, or run get-config-stream first");
+    core.setSecret(key);
+    const entry = { stage: env.STAGE || mode, job: env.GITHUB_JOB || "", runAttempt: Number(env.GITHUB_RUN_ATTEMPT || 1) };
     if (mode === "seal") {
       const extra = parseJsonObject(env.PLAIN_JSON || "", "plain-json");
       const plain: Plain = { org: env.GITHUB_REPOSITORY_OWNER || "", githubHost: hostFromServerUrl(env.GITHUB_SERVER_URL || ""), ...extra } as Plain;
@@ -180,30 +210,38 @@ export default async function run({ core }: Ctx): Promise<void> {
       const e = seal(plain, secrets, key, [{ ...entry, added }]);
       core.setOutput("context", JSON.stringify(e));
       core.setOutput("version", e.version);
+      Object.assign(f, { ok: true, envelope: e, sealedSections: Object.keys(secrets), sealedValues: Object.keys(sec).length });
       core.info(`🧬 sealed context v${e.version}: plain sections [${Object.keys(extra).join(", ")}], sealed sections [${Object.keys(secrets).join(", ")}]`);
     } else if (mode === "open") {
       const e = parse(env.CONTEXT || "");
       const { plain, secrets } = open(e, key);
       const flat = flatten(secrets);
       for (const v of Object.values(flat)) core.setSecret(v);
-      if ((env.EXPORT_ENV || "true") === "true") for (const [n, v] of Object.entries(flat)) core.exportVariable(n, v);
+      const exported = (env.EXPORT_ENV || "true") === "true";
+      if (exported) for (const [n, v] of Object.entries(flat)) core.exportVariable(n, v);
       if (env.DOTENV_PATH) writeFileSync(env.DOTENV_PATH, Object.entries(flat).map(([n, v]) => `${n}=${v}`).join("\n") + "\n", { mode: 0o600 });
       core.setOutput("plain", JSON.stringify(plain));
       core.setOutput("version", e.version);
-      core.info(`🧬 opened context v${e.version}: ${Object.keys(flat).length} sealed value(s) masked${(env.EXPORT_ENV || "true") === "true" ? " and exported" : ""}`);
+      Object.assign(f, { ok: true, envelope: e, sealedSections: Object.keys(secrets), sealedValues: Object.keys(flat).length, exported });
+      core.info(`🧬 opened context v${e.version}: ${Object.keys(flat).length} sealed value(s) masked${exported ? " and exported" : ""}`);
     } else if (mode === "enrich") {
       const e = parse(env.CONTEXT || "");
+      f.fromVersion = e.version;
       const section = env.SECTION || "";
       const plainData = parseJsonObject(env.PLAIN_JSON || "", "plain-json");
       const sec = fromEnv(env.SECRET_ENV_NAMES || "", env);
       const next = enrich(e, section, plainData, sec, entry, key);
       core.setOutput("context", JSON.stringify(next));
       core.setOutput("version", next.version);
+      Object.assign(f, { ok: true, envelope: next, sealedSections: Object.keys(sec).length ? [section] : [], sealedValues: Object.keys(sec).length });
       core.info(`🧬 enriched context v${e.version} → v${next.version} with section "${section}"`);
     } else {
-      core.setFailed(`unknown mode "${mode}" (seal | open | enrich)`);
+      throw new Error(`unknown mode "${mode}" (seal | open | enrich)`);
     }
   } catch (err) {
-    core.setFailed(`cicd-context ${mode}: ${(err as Error).message}`);
+    f.ok = false; f.error = (err as Error).message;
+    core.setFailed(`cicd-context ${mode}: ${f.error}`);
+  } finally {
+    await core.summary.addRaw(contextSummaryMarkdown(f), true).write();
   }
 }

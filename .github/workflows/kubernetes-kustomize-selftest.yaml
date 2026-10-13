@@ -79,4 +79,10 @@ jobs:
             const fails = [];
             if (e.GOOD !== 'success' || e.GOOD_ERRORS !== '0') fails.push(`good: ${e.GOOD}, errors=${e.GOOD_ERRORS}`);
             if (e.BAD !== 'success' || e.BAD_ERRORS !== '3') fails.push(`bad (policy=warn): ${e.BAD}, errors=${e.BAD_ERRORS} (want 3)`);
+            await core.summary.addRaw([
+              '## 🧾 kubernetes-kustomize selftest', '',
+              '| Case | Job result | Errors | Expected |', '|---|---|---|---|',
+              `| ✅ good | ${e.GOOD} | ${e.GOOD_ERRORS || '—'} | success, 0 |`,
+              `| ❌ bad (policy=warn) | ${e.BAD} | ${e.BAD_ERRORS || '—'} | success, 3 |`,
+              '', fails.length ? `**❌ ${fails.join(' · ')}**` : '**✅ selftest passed**', ''].join('\n'), true).write();
             if (fails.length) core.setFailed(fails.join(' · ')); else core.info('ok: good=0 errors, bad=3 errors');

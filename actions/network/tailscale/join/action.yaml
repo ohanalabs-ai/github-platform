@@ -29,6 +29,7 @@ runs:
   using: composite
   steps:
     - name: 🌐 tailscale/github-action (workload identity federation)
+      id: join
       uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
       with:
         oauth-client-id: ${{ inputs.oauth-client-id }}
@@ -36,3 +37,17 @@ runs:
         tags: ${{ inputs.tags }}
         args: ${{ inputs.args }}
         ping: ${{ inputs.ping }}
+
+    # Every run publishes what it did, on every outcome (owner rule 2026-10-13).
+    - name: 📋 tailnet join summary
+      if: always()
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        HELPERS: ${{ github.action_path }}
+        JOIN_OUTCOME: ${{ steps.join.outcome }}
+        CLIENT_ID: ${{ inputs.oauth-client-id }}
+        TAGS: ${{ inputs.tags }}
+      with:
+        script: |
+          const { default: run } = await import(`${process.env.HELPERS}/summary.ts`);
+          await run({ core, exec, github, context });
