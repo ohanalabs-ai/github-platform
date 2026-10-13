@@ -127,9 +127,11 @@ jobs:
             actions/build/cicd-context
             actions/secrets/vault
             actions/network/tailscale
+            actions/github/run-summary
           persist-credentials: false
 
       - name: 🌐 join the tailnet (federated identity, no secret)
+        id: join
         if: ${{ inputs.join-tailscale }}
         uses: ./.vionix-cicd/actions/network/tailscale/join
         with:
@@ -138,6 +140,7 @@ jobs:
           tags: ${{ inputs.tailscale-tags }}
 
       - name: 🔐 Vault login (GitHub OIDC) + listed records
+        id: vault
         if: ${{ inputs.vault-url != '' }}
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
@@ -151,6 +154,7 @@ jobs:
           secrets: ${{ inputs.vault-secrets }}
 
       - name: 🔑 CONFIG_STREAM_KEY (caller secret, else Vault)
+        id: key
         if: ${{ inputs.vault-url != '' }}
         uses: ./.vionix-cicd/actions/secrets/vault/get-config-stream
         with:
@@ -167,5 +171,29 @@ jobs:
           stage: setup
 
       - name: 🔒 revoke the Vault token
+        id: revoke
         if: ${{ always() && inputs.vault-url != '' }}
         uses: ./.vionix-cicd/actions/secrets/vault/revoke-token
+
+      # Every run publishes what it did, on every outcome (owner rule 2026-10-13). Outcomes are passed
+      # explicitly (not toJSON(steps): the Vault login's outputs hold secrets).
+      - name: 📋 run summary
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          HELPERS: ${{ github.workspace }}/.vionix-cicd/actions/github/run-summary
+          TITLE: 🧬 vionix-cicd setup
+          JOB_STATUS: ${{ job.status }}
+          STEP_OUTCOMES: |
+            🌐 tailnet join=${{ steps.join.outcome }}
+            🔐 Vault login + listed records=${{ steps.vault.outcome }}
+            🔑 CONFIG_STREAM_KEY=${{ steps.key.outcome }}
+            🧬 seal the context=${{ steps.seal.outcome }}
+            🔒 revoke the Vault token=${{ steps.revoke.outcome }}
+          FACTS: |
+            Context version=${{ steps.seal.outputs.version }}
+            Key source=${{ steps.key.outputs.source }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.HELPERS}/summary.ts`);
+            await run({ core, exec, github, context });

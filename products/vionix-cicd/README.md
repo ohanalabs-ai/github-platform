@@ -121,3 +121,12 @@ This is the **design + building blocks** (INTEGRATE-29). Not here yet:
   and `gha-<org>-config-stream-admin` (create/update that path, dispatch only), and the `global/`
   folder in the Vault folder design.
 - TLS to Vault: public CAs only (Node's `fetch` takes no per-request CA without npm `undici`).
+
+## Run summaries
+
+Every vionix-cicd workflow and action publishes what it did to the run's summary, on every outcome:
+`setup-config-stream` / `get-config-stream` / `revoke-token` (outcome, Vault path, KV version, rotate,
+org-secret copy — never the key), `cicd-context` (schema, version, plain/sealed **section names**,
+trail, size vs the 900 KiB budget — never a sealed value), `network/tailscale/join` (identity, tags,
+node, tailnet IPs), and a final `📋 run summary` step (`actions/github/run-summary`) with every step's
+outcome. Enforced repo-wide by `actions/github/workflow-summary-lint` (see `actions/README.md`).

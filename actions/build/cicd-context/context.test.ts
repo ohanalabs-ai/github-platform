@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   SCHEMA, canonical, generateKey, decodeKey, seal, open, parse, enrich, flatten, fromEnv, hostFromServerUrl,
+  contextSummaryMarkdown,
 } from "./context.ts";
 
 const KEY = generateKey();
@@ -90,4 +91,24 @@ test("github host comes from GITHUB_SERVER_URL (github.com or GHES)", () => {
   assert.equal(hostFromServerUrl("https://github.com"), "github.com");
   assert.equal(hostFromServerUrl("https://git.example.com/"), "git.example.com");
   assert.equal(hostFromServerUrl(""), "github.com");
+});
+
+test("summary: section names, version, trail and budget — never a sealed value", () => {
+  const key = generateKey();
+  const secret = "s3cr3t-registry-token-value";
+  const e = seal({ org: "o", githubHost: "github.com", registry: { host: "ghcr.io" } }, { setup: { REGISTRY_TOKEN: secret } }, key,
+    [{ stage: "setup", job: "setup", runAttempt: 1, added: ["registry", "setup"] }]);
+  const md = contextSummaryMarkdown({ mode: "seal", ok: true, envelope: e, sealedSections: ["setup"], sealedValues: 1 });
+  assert.match(md, /✅ seal/);
+  assert.match(md, new RegExp(SCHEMA.replace(/[./]/g, "\\$&")));
+  assert.match(md, /`registry`/);
+  assert.match(md, /Sealed sections \| `setup`/);
+  assert.match(md, /KiB of 900 KiB budget/);
+  assert.match(md, /\| setup \| setup \| 1 \| `registry`, `setup` \|/);
+  assert.doesNotMatch(md, new RegExp(secret));
+  assert.doesNotMatch(md, /REGISTRY_TOKEN/);
+  const next = enrich(e, "image", { ref: "ghcr.io/o/r@sha256:abc" }, {}, { stage: "build", job: "build", runAttempt: 1 }, key);
+  assert.match(contextSummaryMarkdown({ mode: "enrich", ok: true, envelope: next, fromVersion: e.version }), new RegExp(`v${e.version} → v${next.version}`));
+  const failed = contextSummaryMarkdown({ mode: "open", ok: false, error: "context does not decrypt" });
+  assert.match(failed, /❌ open failed[\s\S]*does not decrypt/);
 });

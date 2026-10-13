@@ -247,3 +247,26 @@ jobs:
         run: |
           echo "::error ::Failure for missing pinning versions and/or timeout properties!"
           exit 1
+
+      # Every run publishes what it did, on every outcome (owner rule 2026-10-13).
+      - name: 📋 run summary
+        if: always()
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          FILTER_BY: ${{ inputs.filter-by }}
+          PR_FILES: ${{ steps.pr-files.outputs.changed-files }}
+          PIN_OUTCOME: ${{ steps.pin.outcome }}
+          PIN_CHANGES: ${{ steps.pin.outputs.has_changes }}
+          TIMEOUT_OUTCOME: ${{ steps.timeout.outcome }}
+          TIMEOUT_CHANGES: ${{ steps.timeout.outputs.has_changes }}
+          JOB_STATUS: ${{ job.status }}
+        with:
+          script: |
+            const e = process.env;
+            const ic = (o) => ({ success: '✅', failure: '❌', skipped: '⏭️' })[o] || '';
+            await core.summary.addRaw([
+              `## 🔢 action-version-sha — ${ic(e.JOB_STATUS)} ${e.JOB_STATUS}`, '',
+              '| Check | Outcome | Suggestions |', '|---|---|---|',
+              `| 📌 SHA pinning (gha-fix pin) | ${ic(e.PIN_OUTCOME)} ${e.PIN_OUTCOME || 'skipped'} | ${e.PIN_CHANGES === 'true' ? 'yes — see the review comments' : 'none'} |`,
+              `| ⏱️ job timeouts (gha-fix timeout) | ${ic(e.TIMEOUT_OUTCOME)} ${e.TIMEOUT_OUTCOME || 'skipped'} | ${e.TIMEOUT_CHANGES === 'true' ? 'yes — see the review comments' : 'none'} |`,
+              '', `Scope: \`${e.FILTER_BY}\`${e.PR_FILES ? ` — ${e.PR_FILES.split(',').length} workflow file(s) changed in the PR` : ''}.`, ''].join('\n'), true).write();

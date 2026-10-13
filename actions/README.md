@@ -9,6 +9,9 @@ Composite actions (`actions/<category>/<name>/action.yaml` + the script it runs 
 | `scripted/` | [`run-command`](scripted/run-command/) · [`phase-summary`](scripted/phase-summary/) (`summary.sh` + `plan.sh`) | [`scripted-phase.yaml`](../.github/workflows/scripted-phase.yaml) — [devsecops-scripted](../products/devsecops-scripted/README.md): preview, then approve, then apply for any scripted phase (the composites run a command on the runner or inside the caller's tools image and render the approver's summary — the preview's plan manifest in the Terraform-plan-comment shape, resources + redacted diffs); its runner-side toolchain is `gitops/toolchain` |
 | `build/` · `secrets/vault/` · `network/tailscale/` | [`cicd-context`](build/cicd-context/) (seal · open · enrich the encrypted CI context) · [`setup-config-stream`](secrets/vault/setup-config-stream/) · [`get-config-stream`](secrets/vault/get-config-stream/) · [`revoke-token`](secrets/vault/revoke-token/) · [`sign-digest`](secrets/vault/sign-digest/) (sign a statement naming ANY sha256 with the org's Transit key, verified with the public key) · [`tailscale/join`](network/tailscale/join/) (secretless, OIDC federated identity) — TypeScript via `actions/github-script` | [`vionix-cicd-setup.yaml`](../.github/workflows/vionix-cicd-setup.yaml), [`vionix-config-stream-setup.yaml`](../.github/workflows/vionix-config-stream-setup.yaml) — [vionix-cicd](../products/vionix-cicd/README.md) |
 | `docker/` | [`attest`](docker/attest/) — TypeScript via `actions/github-script`: `identity.ts` (the build job's OIDC identity) · `sign.ts` (Vault Transit attest, provenance or vuln, round trip, token revoke) · `verify.ts` (public-key-only re-verification) · `provenance.ts` / `policy.ts` · [`canary`](docker/canary/) (`summary.ts`: the signing canary's verdict + run summary) | [`docker-multiarch-cicd.yaml`](../.github/workflows/docker-multiarch-cicd.yaml) (`build_identity` output) and [`docker-image-attest.yaml`](../.github/workflows/docker-image-attest.yaml), [`vionix-signing-canary.yaml`](../.github/workflows/vionix-signing-canary.yaml) — [devsecops-docker](../products/devsecops-docker/README.md) |
+| `build/` · `secrets/vault/` · `network/tailscale/` | [`cicd-context`](build/cicd-context/) (seal · open · enrich the encrypted CI context) · [`setup-config-stream`](secrets/vault/setup-config-stream/) · [`get-config-stream`](secrets/vault/get-config-stream/) · [`revoke-token`](secrets/vault/revoke-token/) · [`tailscale/join`](network/tailscale/join/) (secretless, OIDC federated identity) — TypeScript via `actions/github-script` | [`vionix-cicd-setup.yaml`](../.github/workflows/vionix-cicd-setup.yaml), [`vionix-config-stream-setup.yaml`](../.github/workflows/vionix-config-stream-setup.yaml) — [vionix-cicd](../products/vionix-cicd/README.md) |
+| `docker/` | [`attest`](docker/attest/) — TypeScript via `actions/github-script`: `identity.ts` (the build job's OIDC identity) · `sign.ts` (Vault Transit attest, provenance or vuln, round trip, token revoke) · `verify.ts` (public-key-only re-verification) · `provenance.ts` / `policy.ts` | [`docker-multiarch-cicd.yaml`](../.github/workflows/docker-multiarch-cicd.yaml) (`build_identity` output) and [`docker-image-attest.yaml`](../.github/workflows/docker-image-attest.yaml) — [devsecops-docker](../products/devsecops-docker/README.md) |
+| `github/` | [`run-summary`](github/run-summary/) (the final `if: always()` step-outcome + facts table) · [`workflow-summary-lint`](github/workflow-summary-lint/) (every workflow publishes a run summary) — TypeScript via `actions/github-script` | [`vionix-config-stream-setup.yaml`](../.github/workflows/vionix-config-stream-setup.yaml), [`vionix-cicd-setup.yaml`](../.github/workflows/vionix-cicd-setup.yaml); the lint runs in [`actions-typescript-selftest.yaml`](../.github/workflows/actions-typescript-selftest.yaml) |
 
 ## Two homes, one target
 
@@ -16,6 +19,19 @@ Org composites currently live in two places: **`ohanalabs-ai/actions`** (`docker
 
 ## Conventions
 
+- **Every workflow publishes a run summary of what it did** (owner rule 2026-10-13) — on **every**
+  outcome path (created / kept / skipped / failed), never a secret value. How:
+  - an action/helper writes its own section (`core.summary.addRaw(md).write()` in its TypeScript, in a
+    `finally` so a failure still summarizes — `secrets/vault`, `build/cicd-context`, `network/tailscale/join`);
+  - the job ends with a `📋 run summary` step, `if: always()`, rendering the step outcomes
+    (`steps.<id>.outcome`, passed explicitly as `label=outcome` lines — **not** `toJSON(steps)`, which
+    would hand a Vault login's secret outputs to that step) plus named non-secret facts, via
+    [`github/run-summary`](github/run-summary/);
+  - a pure caller (every job `uses:` a reusable workflow) is covered by its callee.
+  Enforced by [`github/workflow-summary-lint`](github/workflow-summary-lint/) in
+  `actions-typescript-selftest.yaml` — a PR adding a workflow without a summary fails; an exception
+  must be listed in its `ALLOWLIST` with a reason (none today). Trigger: planeodev/planeo-infra run
+  38465157413 (config-stream key **kept**) published an empty summary.
 - Emoji `name:` on the steps; every third-party `uses:` pinned to a commit SHA with a version comment; org-owned references at `@main`.
 - The reusable workflows check out this repo at their own commit (`job.workflow_sha`) and call the actions as `./.gitops-platform/actions/<category>/<name>`, so a workflow on a feature branch runs that branch's actions.
 - Every script has a header documenting its arguments/environment and is covered by `tests/` (`tests/gitops/run-tests.sh`, `tests/scripted/run-tests.sh`) and the matching `*-selftest.yaml` workflow.
