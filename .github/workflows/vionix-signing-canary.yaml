@@ -1,0 +1,276 @@
+# 🐤 vionix-signing-canary — prove an org's signing chain end to end, on demand, or sign anything.
+#
+#   mode image  (the canary): a throwaway image from the CALLER's canary compose file is built by the
+#     REAL builder (docker-multiarch-cicd.yaml — so the provenance carries the builder's identity, the
+#     builder.id the clusters' admission CUE asserts) → scanned (docker-image-security.yaml,
+#     report-only) → attested (docker-image-attest.yaml: provenance + SBOM with the org's Vault
+#     Transit key, no transparency log, tailnet via the Tailscale OIDC federated identity) →
+#     re-verified HERE with ONLY the exported public key + the approved-build CUE (no Vault, no
+#     cluster). Image: ghcr.io/<owner>/<repo>/vionix-signing-canary.
+#   mode digest (a "sign anything" request): signs a canonical statement naming `subject-digest`
+#     (any sha256) + `subject-name` with the org's Transit key and verifies it with the public key
+#     (actions/secrets/vault/sign-digest). Outputs the statement, signature, key version, public key.
+#
+# Both modes sign only from a BRANCH run on main|develop by push or workflow_dispatch — what the
+# org-wide Vault role gha-<owner>-image-signer accepts (planeo-infra vault/clusters/*/github-actions);
+# a pull_request or schedule run cannot sign (and the builder's ref-build does not run on schedule).
+# The 📋 summary job ALWAYS runs and renders every stage's outcome (owner rule: every workflow
+# publishes what it did). Never prints a token, a secret, or a key's private half (Transit never
+# exports it).
+#
+# Caller (thin; see products/devsecops-docker/README.md → "Signing canary"):
+#   permissions: { contents: write, packages: write, id-token: write, attestations: write,
+#                  artifact-metadata: write, pull-requests: write }   # what the nested builder declares
+#   uses: ohanalabs-ai/github-platform/.github/workflows/vionix-signing-canary.yaml@main
+#   with: { mode: image, vault-url: …, tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }},
+#           tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }},
+#           compose-file: canary/vionix-signing/docker-compose.yaml, compose-context: canary/vionix-signing }
+name: 🐤 vionix-signing-canary
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "image (build → scan → attest → verify a throwaway image) | digest (sign subject-digest)"
+        type: string
+        default: image
+      compose-file:
+        description: "mode image: the caller's canary compose file (one service, a tiny Dockerfile)"
+        type: string
+        default: canary/vionix-signing/docker-compose.yaml
+      compose-context:
+        description: "mode image: its build context"
+        type: string
+        default: canary/vionix-signing
+      platforms:
+        description: "mode image: platforms to build (one is enough for a canary)"
+        type: string
+        default: linux/amd64
+      subject-digest:
+        description: "mode digest: sha256:<64 hex> to sign"
+        type: string
+        default: ""
+      subject-name:
+        description: "mode digest: what the digest is (recorded in the signed statement)"
+        type: string
+        default: ""
+      vault-url:
+        description: Vault address (tailnet-only for our orgs → join-tailscale)
+        type: string
+        required: true
+      vault-role:
+        description: "Vault JWT role (default gha-<owner>-image-signer)"
+        type: string
+        default: ""
+      transit-key:
+        description: "Vault Transit key (default <owner>-ci-images)"
+        type: string
+        default: ""
+      join-tailscale:
+        type: boolean
+        default: true
+      tailscale-oauth-client-id:
+        description: "The org's Tailscale OIDC federated identity client id (vars.TS_FEDERATED_CLIENT_ID) — not a secret"
+        type: string
+        default: ""
+      tailscale-audience:
+        description: "Its audience (vars.TS_FEDERATED_AUDIENCE) — not a secret"
+        type: string
+        default: ""
+      runs-on:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      image:
+        description: "mode image: the canary image, digest-pinned"
+        value: ${{ jobs.build.outputs.image_ref }}
+      signature:
+        description: "mode digest: the Transit signature over the statement"
+        value: ${{ jobs.sign-digest.outputs.signature }}
+      statement-b64:
+        description: "mode digest: the signed statement (canonical JSON, base64)"
+        value: ${{ jobs.sign-digest.outputs.statement-b64 }}
+      public-key-b64:
+        description: The signing key's public half (PEM, base64)
+        value: ${{ jobs.attest.outputs.public-key-b64 || jobs.sign-digest.outputs.public-key-b64 }}
+
+jobs:
+  # ── mode image ───────────────────────────────────────────────────────────────────────────────
+  build:
+    if: inputs.mode == 'image'
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      pull-requests: write
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+    with:
+      docker-compose-file-name: ${{ inputs.compose-file }}
+      docker-compose-context: ${{ inputs.compose-context }}
+      image-name-suffix: vionix-signing-canary
+      platforms: ${{ inputs.platforms }}
+      attestation-mode: none # signing is the attest job's — that is what this canary proves
+
+  scan:
+    needs: build
+    if: inputs.mode == 'image' && needs.build.outputs.image_ref != ''
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+      pull-requests: write
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-security.yaml@main
+    with:
+      image: ${{ needs.build.outputs.image_ref }}
+      severity-threshold: NONE # report-only: the canary proves the chain, not the base image
+      add-pr-comment: false
+
+  attest:
+    needs: [build, scan]
+    if: always() && inputs.mode == 'image' && needs.build.result == 'success' && needs.build.outputs.image_ref != ''
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-image-attest.yaml@main
+    with:
+      image: ${{ needs.build.outputs.image_ref }}
+      mode: provenance
+      build-identity: ${{ needs.build.outputs.build_identity }}
+      sbom: true
+      vault-url: ${{ inputs.vault-url }}
+      vault-role: ${{ inputs.vault-role != '' && inputs.vault-role || format('gha-{0}-image-signer', github.repository_owner) }}
+      transit-key: ${{ inputs.transit-key != '' && inputs.transit-key || format('{0}-ci-images', github.repository_owner) }}
+      join-tailscale: ${{ inputs.join-tailscale }}
+      tailscale-oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+      tailscale-audience: ${{ inputs.tailscale-audience }}
+      runs-on: ${{ inputs.runs-on }}
+
+  verify:
+    # The canary's own check, independent of the attest workflow's: ONLY the public key the attest
+    # job exported + the registry — exactly what the clusters' admission does (signature, SLSA
+    # provenance, approved-build CUE). No Vault, no cluster.
+    name: ✔️ verify (public key only + approved-build CUE)
+    needs: [build, attest]
+    if: always() && inputs.mode == 'image' && needs.attest.outputs.signed == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .canary
+          sparse-checkout: actions/docker/attest
+          persist-credentials: false
+      - name: Log in to ghcr.io
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 🧰 install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: ✔️ cosign verify + verify-attestation (approved-build CUE)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SUBJECT: ${{ needs.build.outputs.image_ref }}
+          SIGNED: ${{ needs.attest.outputs.signed }}
+          PUBLIC_KEY_B64: ${{ needs.attest.outputs.public-key-b64 }}
+          KEY_REF: ${{ needs.attest.outputs.key-ref }}
+          ORG: ${{ github.repository_owner }}
+          SIGNER_WORKFLOW: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml
+          TITLE: Signing canary — verification with the public key only
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.canary/actions/docker/attest/verify.ts`);
+            await run({ core, exec, github, context });
+
+  # ── mode digest ──────────────────────────────────────────────────────────────────────────────
+  sign-digest:
+    name: 🔏 sign digest (${{ inputs.subject-name }})
+    if: inputs.mode == 'digest'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # hashicorp/vault-action exportToken exports VAULT_TOKEN only — the TypeScript also reads VAULT_ADDR.
+      VAULT_ADDR: ${{ inputs.vault-url }}
+    outputs:
+      signature: ${{ steps.sign.outputs.signature }}
+      statement-b64: ${{ steps.sign.outputs.statement-b64 }}
+      key-version: ${{ steps.sign.outputs.key-version }}
+      public-key-b64: ${{ steps.sign.outputs.public-key-b64 }}
+      verified: ${{ steps.sign.outputs.verified }}
+    steps:
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .canary
+          sparse-checkout: |
+            actions/secrets/vault
+            actions/network/tailscale
+          persist-credentials: false
+      - name: 🌐 join the tailnet (federated identity, no secret)
+        if: inputs.join-tailscale
+        uses: ./.canary/actions/network/tailscale/join
+        with:
+          oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+          audience: ${{ inputs.tailscale-audience }}
+      - name: 🔐 Vault login (GitHub OIDC)
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: ${{ inputs.vault-url }}
+          method: jwt
+          path: github-jwt
+          role: ${{ inputs.vault-role != '' && inputs.vault-role || format('gha-{0}-image-signer', github.repository_owner) }}
+          jwtGithubAudience: https://github.com/${{ github.repository_owner }}
+          exportToken: true
+      - name: 🔏 sign the statement + verify with the public key
+        id: sign
+        uses: ./.canary/actions/secrets/vault/sign-digest
+        with:
+          subject-digest: ${{ inputs.subject-digest }}
+          subject-name: ${{ inputs.subject-name }}
+          transit-key: ${{ inputs.transit-key }}
+      - name: 🔒 revoke the Vault token
+        if: always()
+        uses: ./.canary/actions/secrets/vault/revoke-token
+
+  # ── always ───────────────────────────────────────────────────────────────────────────────────
+  summary:
+    name: 📋 summary
+    needs: [build, scan, attest, verify, sign-digest]
+    if: always()
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+    steps:
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .canary
+          sparse-checkout: actions/docker/canary
+          persist-credentials: false
+      - name: 📋 render the canary result
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          MODE: ${{ inputs.mode }}
+          NEEDS: ${{ toJSON(needs) }}
+          ORG: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.canary/actions/docker/canary/summary.ts`);
+            await run({ core, exec, github, context });

@@ -162,6 +162,28 @@ it into the predicate. A caller cannot feed a foreign identity in. The org-wide 
 | `signing-refs` | `refs/heads/main,refs/heads/develop` | refs whose runs may sign; `pull_request` never signs |
 | outputs | | `signed`, `key-ref`, `public-key-b64`, `builder-id` |
 
+## Signing canary — prove an org's chain, or sign any digest
+
+[`vionix-signing-canary.yaml`](../../.github/workflows/vionix-signing-canary.yaml) is the on-demand
+end-to-end test of the chain above, and a "sign anything" request:
+
+| mode | what it does | proves |
+|---|---|---|
+| `image` | builds a throwaway image from the caller's `canary/vionix-signing/` (one `FROM scratch` file) with the **real** builder → scan (report-only) → attest (provenance + SBOM, the org's Transit key, no tlog) → **re-verifies with only the exported public key + the approved-build CUE** | tailnet join (Tailscale OIDC federated identity) → Vault login (`gha-<org>-image-signer`) → Transit signing → admission-equivalent verification, with no Vault and no cluster in the verify step |
+| `digest` | signs a canonical statement `{subject{name,digest}, signer{repository,ref,sha,run_id,workflow}, key, signed_at}` with the org's Transit key and verifies it locally with the public half ([`sign-digest`](../../actions/secrets/vault/sign-digest/)) | "sign anything": any `sha256:` (an image, a file, a release) — outputs `statement-b64`, `signature` (`vault:v<N>:…`), `public-key-b64` |
+
+The `📋 summary` job always renders every stage (pass/fail + facts). Signing needs a **branch run on
+`main`/`develop` by `workflow_dispatch` or `push`** — what the org-wide Vault role accepts (a
+`schedule` run cannot sign, and the builder's ref build does not run on `schedule`, so the canary is
+dispatched, not scheduled). Callers live in each org:
+
+| org | caller | dispatch |
+|---|---|---|
+| ohanalabs-ai | [`vionix-signing-canary-ohanalabs-ai.yaml`](../../.github/workflows/vionix-signing-canary-ohanalabs-ai.yaml) (this repo) | `gh workflow run vionix-signing-canary-ohanalabs-ai.yaml -R ohanalabs-ai/github-platform --ref main` |
+| planeodev | `planeodev/planeo-infra` `.github/workflows/vionix-signing-canary.yml` | `gh workflow run vionix-signing-canary.yml -R planeodev/planeo-infra --ref develop` |
+
+Sign a digest: `gh workflow run <caller> -R <repo> --ref <main|develop> -f mode=digest -f subject-digest=sha256:<64 hex> -f subject-name=<what it is>`.
+
 ## Build provenance: public vs private repositories
 
 | Caller repo | Mechanism (`attestation-mode: auto`) | Produced in the build job | Consumers verify with |

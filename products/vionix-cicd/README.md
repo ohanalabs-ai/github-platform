@@ -106,6 +106,8 @@ jobs:
 
 ## Status and follow-ups
 
+- 🐤 The chain is proven on demand by the signing canary ([devsecops-docker → Signing canary](../devsecops-docker/README.md#signing-canary--prove-an-orgs-chain-or-sign-any-digest)): build → scan → attest → public-key verify, or sign any digest.
+
 This is the **design + building blocks** (INTEGRATE-29). Not here yet:
 
 - ✅ `docker-multiarch-cicd.yaml` is a clean builder again (no Vault/Tailscale); it outputs

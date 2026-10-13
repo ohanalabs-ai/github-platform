@@ -1,0 +1,41 @@
+# 🐤 Prove the ohanalabs-ai signing chain end to end (mode image), or sign any digest with the
+# ohanalabs-ai Vault Transit key (mode digest) — a thin caller of vionix-signing-canary.yaml.
+# Signing needs a branch run on main|develop (workflow_dispatch): the org-wide Vault role
+# gha-ohanalabs-ai-image-signer accepts push|workflow_dispatch on those refs only. The tailnet join uses
+# the org's Tailscale OIDC federated identity (org variables TS_FEDERATED_*, visibility all — this
+# repo is public). Vault has no ohanalabs-ai VAULT_ADDR variable yet, hence the literal URL.
+name: 🐤 vionix signing canary (ohanalabs-ai)
+run-name: "🐤 vionix signing canary (ohanalabs-ai) — ${{ inputs.mode == 'digest' && format('sign {0} {1}', inputs.subject-name, inputs.subject-digest) || 'build → scan → attest → verify' }}"
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "image = prove the chain on a throwaway image · digest = sign subject-digest"
+        type: choice
+        options: [image, digest]
+        default: image
+      subject-digest:
+        description: "mode digest: sha256:<64 hex>"
+        type: string
+        default: ""
+      subject-name:
+        description: "mode digest: what it is (e.g. ghcr.io/ohanalabs-ai/x, release/v1.0.0.tar.gz)"
+        type: string
+        default: ""
+jobs:
+  canary:
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      pull-requests: write
+    uses: ohanalabs-ai/github-platform/.github/workflows/vionix-signing-canary.yaml@main
+    with:
+      mode: ${{ inputs.mode }}
+      subject-digest: ${{ inputs.subject-digest }}
+      subject-name: ${{ inputs.subject-name }}
+      vault-url: https://vault.platform.planeo.dev
+      tailscale-oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}
+      tailscale-audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
