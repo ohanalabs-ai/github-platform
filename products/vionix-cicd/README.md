@@ -73,6 +73,7 @@ product removes. The setup job reads it from the caller's secret, else from Vaul
 |---|---|
 | [`.github/workflows/vionix-cicd-setup.yaml`](../../.github/workflows/vionix-cicd-setup.yaml) | the setup job: tailnet → Vault → key → seal → `outputs.context` |
 | [`.github/workflows/vionix-config-stream-setup.yaml`](../../.github/workflows/vionix-config-stream-setup.yaml) | create / rotate the org's key (+ org-secret copy); callers wrap it in a `workflow_dispatch` |
+| [`.github/workflows/vionix-config-stream-key-ohanalabs-ai.yaml`](../../.github/workflows/vionix-config-stream-key-ohanalabs-ai.yaml) | the **ohanalabs-ai** org's manual wrapper (dispatch from `main` — the admin role binds the reusable `@refs/heads/main`); planeodev's twin is `planeodev/planeo-infra` `.github/workflows/vionix-config-stream-setup.yml` |
 | [`actions/build/cicd-context`](../../actions/build/cicd-context/) | `seal` · `open` · `enrich` the envelope |
 | [`actions/secrets/vault/setup-config-stream`](../../actions/secrets/vault/setup-config-stream/) · [`get-config-stream`](../../actions/secrets/vault/get-config-stream/) · [`revoke-token`](../../actions/secrets/vault/revoke-token/) | the key in Vault; end the job's Vault token |
 | [`actions/network/tailscale/join`](../../actions/network/tailscale/join/) | secretless tailnet join (org variables `TS_FEDERATED_CLIENT_ID` / `TS_FEDERATED_AUDIENCE`) |
