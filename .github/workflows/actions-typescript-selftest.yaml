@@ -3,6 +3,8 @@
 #   1. no Python (*.py / *.pyc) anywhere under actions/
 #   2. the TypeScript self-tests (*.test.ts, node:test + node:assert) pass on github-script's own
 #      Node 24 runtime — the same runtime that executes the actions (native type stripping)
+#   4. EVERY .github/workflows/*.y?ml publishes a run summary (owner rule 2026-10-13) —
+#      actions/github/workflow-summary-lint (writes its verdict table to this run's summary)
 #   3. every actions/**/action.y?ml PARSES — a manifest GitHub cannot load fails only when a
 #      workflow uses it, after the merge (revoke-token: an unquoted `: ` in its description,
 #      planeodev/planeo-infra run 38457343453). yq (preinstalled on the runner) does the parsing.
@@ -12,11 +14,12 @@ on:
   pull_request:
     paths:
       - "actions/**"
-      - ".github/workflows/actions-typescript-selftest.yaml"
+      - ".github/workflows/**"
   push:
     branches: [main]
     paths:
       - "actions/**"
+      - ".github/workflows/**"
 
 permissions:
   contents: read
@@ -57,6 +60,12 @@ jobs:
             }
             if (bad.length) core.setFailed(`${bad.length} action manifest(s) do not parse:\n` + bad.join('\n'));
             else core.info(`${files.length} action manifest(s) parse`);
+      - name: 🧾 every workflow publishes a run summary
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/actions/github/workflow-summary-lint/lint.ts`);
+            await run({ core, exec, github, context });
       - name: TypeScript self-tests (node:test on github-script's Node 24)
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
@@ -67,4 +76,11 @@ jobs:
             const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walk(p) : (n.endsWith('.test.ts') && tests.push(p)); } };
             walk('actions');
             core.info(`node ${process.version}: ${tests.length} test file(s)`);
-            if (tests.length) await exec.exec(process.execPath, ['--test', ...tests]);
+            const r = tests.length ? await exec.getExecOutput(process.execPath, ['--test', ...tests], { ignoreReturnCode: true }) : { exitCode: 0, stdout: '' };
+            const n = (k) => (r.stdout.match(new RegExp(`^ℹ ${k} (\\d+)`, 'm')) || [])[1] || '0';
+            await core.summary.addRaw([
+              '## 🧪 TypeScript actions self-tests', '',
+              `| Node | Test files | Tests | Pass | Fail |`, '|---|---|---|---|---|',
+              `| ${process.version} | ${tests.length} | ${n('tests')} | ${n('pass')} | ${n('fail')} |`, '',
+              r.exitCode === 0 ? '**✅ all pass**' : '**❌ failures — see the step log**', ''].join('\n'), true).write();
+            if (r.exitCode !== 0) core.setFailed(`node --test failed (${n('fail')} failing)`);

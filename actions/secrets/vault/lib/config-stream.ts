@@ -68,20 +68,54 @@ function headers(): Record<string, string> {
   return h;
 }
 
+// What happened, for the run summary — never a key value. Every mode and every outcome (including a
+// failure) ends with a summary (owner rule 2026-10-13: every workflow publishes what it did).
+export interface Facts {
+  mode: string;
+  outcome?: "created" | "rotated" | "kept" | "read" | "provided" | "revoked" | "no-token" | "failed";
+  path?: string; org?: string; host?: string; version?: number | string; rotate?: boolean;
+  orgSecret?: "pushed" | "not-requested" | "failed"; source?: "env" | "vault"; httpStatus?: number; error?: string;
+}
+
+const OUTCOME: Record<string, string> = {
+  created: "✅ created", rotated: "🔄 rotated", kept: "🟰 kept (unchanged)", read: "📥 read from Vault",
+  provided: "📥 provided by the org secret (Vault not called)", revoked: "🔒 revoked", "no-token": "⏭️ no Vault token to revoke",
+  failed: "❌ failed",
+};
+
+export function summaryMarkdown(f: Facts): string {
+  const title = f.mode === "revoke" ? "🔒 Vault token" : `🔑 vionix config-stream key — ${f.mode}`;
+  const rows: [string, string][] = [["Outcome", OUTCOME[f.outcome || "failed"] || String(f.outcome)]];
+  if (f.path) rows.push(["Vault path", `\`${f.path}\` (field \`${FIELD}\`)`]);
+  if (f.org) rows.push(["GitHub org", `${f.org}${f.host ? ` @ ${f.host}` : ""}`]);
+  if (f.version !== undefined && f.version !== "") rows.push(["KV version", `v${f.version}`]);
+  if (f.rotate !== undefined) rows.push(["Rotate requested", f.rotate ? "yes" : "no — create-only (an existing key is never replaced)"]);
+  if (f.orgSecret) rows.push(["Org secret copy", f.orgSecret === "pushed" ? `pushed to **${f.org}** (visibility private)` : f.orgSecret === "failed" ? "❌ push failed" : "not requested (push-org-secret off)"]);
+  if (f.source) rows.push(["Key source", f.source === "env" ? "org secret CONFIG_STREAM_KEY" : "Vault"]);
+  if (f.httpStatus !== undefined) rows.push(["Vault HTTP", String(f.httpStatus)]);
+  if (f.error) rows.push(["Error", f.error.replace(/\|/g, "\\|")]);
+  return [`## ${title}`, "", "| | |", "|---|---|", ...rows.map(([k, v]) => `| ${k} | ${v} |`), "", "_The key value is never printed._", ""].join("\n");
+}
+
 export default async function run({ core, exec }: Ctx): Promise<void> {
   const env = process.env;
   const mode = env.MODE || "get";
+  const f: Facts = { mode };
   try {
     if (mode === "revoke") {
-      if (!env.VAULT_ADDR || !env.VAULT_TOKEN) { core.info("no Vault token to revoke"); return; }
+      if (!env.VAULT_ADDR || !env.VAULT_TOKEN) { f.outcome = "no-token"; core.info("no Vault token to revoke"); return; }
       const r = await fetch(`${env.VAULT_ADDR.replace(/\/+$/, "")}/v1/auth/token/revoke-self`, { method: "POST", headers: headers() });
+      f.httpStatus = r.status; f.outcome = r.ok ? "revoked" : "failed";
+      if (!r.ok) f.error = `revoke-self returned HTTP ${r.status}`;
       core.info(`🔒 Vault token revoke-self: HTTP ${r.status}`);
       return;
     }
     const host = env.GITHUB_HOST_OVERRIDE || hostFromServerUrl(env.GITHUB_SERVER_URL || "");
     const org = env.GITHUB_ORG_OVERRIDE || env.GITHUB_REPOSITORY_OWNER || "";
+    f.host = host; f.org = org;
     const path = logicalPath(host, org);
     const mount = env.KV_MOUNT || "planeo";
+    f.path = `${mount}/${path}`;
     core.setOutput("path", `${mount}/${path}`);
 
     if (mode === "get") {
@@ -89,6 +123,7 @@ export default async function run({ core, exec }: Ctx): Promise<void> {
       if (existing && (env.PREFER_EXISTING || "true") === "true") {
         core.setSecret(existing);
         core.setOutput("source", "env");
+        f.source = "env"; f.outcome = "provided";
         core.info("🔑 CONFIG_STREAM_KEY already provided (org secret) — Vault not called");
         return;
       }
@@ -100,21 +135,25 @@ export default async function run({ core, exec }: Ctx): Promise<void> {
       core.exportVariable(FIELD, kv.value);
       core.setOutput("source", "vault");
       core.setOutput("version", kv.version ?? 0);
+      f.source = "vault"; f.version = kv.version ?? 0; f.outcome = "read";
       core.info(`🔑 CONFIG_STREAM_KEY read from ${mount}/${path} (v${kv.version}) — masked, exported`);
       return;
     }
 
     if (mode === "setup") {
       const rotate = (env.ROTATE || "false") === "true";
+      const push = (env.PUSH_ORG_SECRET || "false") === "true";
+      f.rotate = rotate; f.orgSecret = push ? undefined : "not-requested";
       const url = kvDataUrl(env.VAULT_ADDR || "", mount, path);
       const cur = await fetch(url, { headers: headers() });
       const kv = parseKvRead(cur.status, cur.status === 404 ? null : await cur.json());
       if (kv.found && !rotate) {
         core.setOutput("created", "false");
         core.setOutput("version", kv.version ?? 0);
+        f.outcome = "kept"; f.version = kv.version ?? 0;
         core.info(`🔑 ${mount}/${path} already holds ${FIELD} (v${kv.version}) — unchanged (set rotate: true to replace it)`);
         if (kv.value) core.setSecret(kv.value);
-        if ((env.PUSH_ORG_SECRET || "false") === "true" && kv.value) await pushOrgSecret(core, exec, org, kv.value);
+        if (push && kv.value) { f.orgSecret = "failed"; await pushOrgSecret(core, exec, org, kv.value); f.orgSecret = "pushed"; }
         return;
       }
       const key = randomBytes(32).toString("base64");
@@ -124,14 +163,20 @@ export default async function run({ core, exec }: Ctx): Promise<void> {
       const wb = w.status === 200 ? await w.json() : {};
       core.setOutput("created", "true");
       core.setOutput("version", wb?.data?.version ?? 0);
+      f.outcome = rotate ? "rotated" : "created"; f.version = wb?.data?.version ?? "?";
       core.info(`🔑 ${rotate ? "rotated" : "created"} ${FIELD} at ${mount}/${path} (v${wb?.data?.version ?? "?"})`);
-      if ((env.PUSH_ORG_SECRET || "false") === "true") await pushOrgSecret(core, exec, org, key);
-      await core.summary.addRaw(`## 🔑 vionix config-stream key\n\n${rotate ? "Rotated" : "Created"} \`${FIELD}\` at \`${mount}/${path}\`${(env.PUSH_ORG_SECRET || "false") === "true" ? `, pushed as org secret of **${org}** (visibility private)` : ""}. The value is never printed.\n`, true).write();
+      if (push) { f.orgSecret = "failed"; await pushOrgSecret(core, exec, org, key); f.orgSecret = "pushed"; }
       return;
     }
-    core.setFailed(`unknown mode "${mode}" (setup | get | revoke)`);
+    f.outcome = "failed"; f.error = `unknown mode "${mode}" (setup | get | revoke)`;
+    core.setFailed(f.error);
   } catch (err) {
-    core.setFailed(`config-stream ${mode}: ${(err as Error).message}`);
+    // keep a created/kept outcome when only the org-secret push failed afterwards
+    if (!f.outcome || f.orgSecret !== "failed") f.outcome = "failed";
+    f.error = (err as Error).message;
+    core.setFailed(`config-stream ${mode}: ${f.error}`);
+  } finally {
+    await core.summary.addRaw(summaryMarkdown(f), true).write();
   }
 }
 

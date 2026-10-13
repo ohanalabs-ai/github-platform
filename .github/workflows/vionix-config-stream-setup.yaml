@@ -84,9 +84,11 @@ jobs:
           sparse-checkout: |
             actions/secrets/vault
             actions/network/tailscale
+            actions/github/run-summary
           persist-credentials: false
 
       - name: 🌐 join the tailnet (federated identity, no secret)
+        id: join
         if: ${{ inputs.join-tailscale }}
         uses: ./.vionix-cicd/actions/network/tailscale/join
         with:
@@ -94,6 +96,7 @@ jobs:
           audience: ${{ inputs.tailscale-audience }}
 
       - name: 🔐 Vault login (GitHub OIDC)
+        id: vault
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
           url: ${{ inputs.vault-url }}
@@ -104,6 +107,7 @@ jobs:
           exportToken: true
 
       - name: 🔑 create / rotate CONFIG_STREAM_KEY
+        id: key
         uses: ./.vionix-cicd/actions/secrets/vault/setup-config-stream
         with:
           kv-mount: ${{ inputs.kv-mount }}
@@ -112,5 +116,31 @@ jobs:
           org-admin-token: ${{ secrets.ORG_ADMIN_TOKEN }}
 
       - name: 🔒 revoke the Vault token
+        id: revoke
         if: ${{ always() }}
         uses: ./.vionix-cicd/actions/secrets/vault/revoke-token
+
+      # Every run publishes what it did, on every outcome (owner rule 2026-10-13). Outcomes are passed
+      # explicitly (not toJSON(steps): the Vault login's outputs hold secrets).
+      - name: 📋 run summary
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          HELPERS: ${{ github.workspace }}/.vionix-cicd/actions/github/run-summary
+          TITLE: 🔑 vionix config-stream key
+          JOB_STATUS: ${{ job.status }}
+          STEP_OUTCOMES: |
+            🌐 tailnet join=${{ steps.join.outcome }}
+            🔐 Vault login (${{ inputs.vault-role }})=${{ steps.vault.outcome }}
+            🔑 create / rotate CONFIG_STREAM_KEY=${{ steps.key.outcome }}
+            🔒 revoke the Vault token=${{ steps.revoke.outcome }}
+          FACTS: |
+            Vault path=${{ steps.key.outputs.path }}
+            KV version=${{ steps.key.outputs.version }}
+            Created in this run=${{ steps.key.outputs.created }}
+            Rotate requested=${{ inputs.rotate }}
+            Org secret push requested=${{ inputs.push-org-secret }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.HELPERS}/summary.ts`);
+            await run({ core, exec, github, context });
