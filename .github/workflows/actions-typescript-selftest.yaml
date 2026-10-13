@@ -3,6 +3,9 @@
 #   1. no Python (*.py / *.pyc) anywhere under actions/
 #   2. the TypeScript self-tests (*.test.ts, node:test + node:assert) pass on github-script's own
 #      Node 24 runtime — the same runtime that executes the actions (native type stripping)
+#   3. every actions/**/action.y?ml PARSES — a manifest GitHub cannot load fails only when a
+#      workflow uses it, after the merge (revoke-token: an unquoted `: ` in its description,
+#      planeodev/planeo-infra run 38457343453). yq (preinstalled on the runner) does the parsing.
 name: 🧪 actions-typescript-selftest
 
 on:
@@ -38,6 +41,22 @@ jobs:
             walk('actions');
             if (bad.length) core.setFailed('Python is not allowed under actions/ (use TypeScript via actions/github-script): ' + bad.join(', '));
             else core.info('no Python under actions/');
+      - name: Action manifests parse (yq)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { readdirSync, statSync } = await import('node:fs');
+            const { join } = await import('node:path');
+            const files = [];
+            const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walk(p) : (/^action\.ya?ml$/.test(n) && files.push(p)); } };
+            walk('actions');
+            const bad = [];
+            for (const f of files) {
+              const r = await exec.getExecOutput('yq', ['e', '.', f], { silent: true, ignoreReturnCode: true });
+              if (r.exitCode !== 0) bad.push(`${f}: ${r.stderr.trim()}`);
+            }
+            if (bad.length) core.setFailed(`${bad.length} action manifest(s) do not parse:\n` + bad.join('\n'));
+            else core.info(`${files.length} action manifest(s) parse`);
       - name: TypeScript self-tests (node:test on github-script's Node 24)
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
