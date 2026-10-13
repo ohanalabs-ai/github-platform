@@ -74,4 +74,6 @@ runs:
         DESTINATION_NAMESPACE: ${{ inputs.destination-namespace }}
         TIMEOUT: ${{ inputs.timeout }}
         FRAG_DIR: ${{ inputs.frag-dir }}
+        # read-only: the compare API decides whether a NEWER synced revision contains WANT
+        GH_TOKEN: ${{ github.token }}
       run: bash "${{ github.action_path }}/argocd-refresh.sh"

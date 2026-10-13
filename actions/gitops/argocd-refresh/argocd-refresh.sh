@@ -53,18 +53,34 @@ if [ "$IN_ARGOCD" = "false" ]; then echo "$APP not visible yet — created after
 if ! argocd app get "$APP" --hard-refresh -o json >/dev/null 2>&1; then
   if [ "$IN_ARGOCD" = "false" ]; then notes+=("hard-refresh: app not (yet) visible"); else st="refresh-failed"; notes+=("hard-refresh failed"); fi
 fi
-# 1. ArgoCD: poll until the synced revision is THIS commit and the app is Synced + Healthy
+# A synced revision NEWER than WANT that contains it is a pass too: the branch can move past the
+# merged commit before this check runs (a re-run of an old run, or two merges in a row) — an exact
+# match then never comes (planeodev/planeo-infra run 38444102568 waited on 500f3d0 ⊇ ae8815c).
+# Decided by the GitHub compare API (status ahead|identical = REV's history contains WANT);
+# cached per revision, so the poll loop calls the API once per new revision.
+_contains_yes=" "; _contains_no=" "   # plain-string cache (portable: no associative arrays)
+contains_want() {  # $1 = a 40-hex revision
+  local r="$1" st
+  [ "$r" = "$WANT" ] && return 0
+  [[ "$r" =~ ^[0-9a-f]{40}$ ]] && [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] || return 1
+  case "$_contains_yes" in *" $r "*) return 0 ;; esac
+  case "$_contains_no" in *" $r "*) return 1 ;; esac
+  st=$(curl -fsS --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+    "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/compare/$WANT...$r" 2>/dev/null | jq -r '.status // ""' || true)
+  case "$st" in ahead|identical) _contains_yes+="$r "; return 0 ;; *) _contains_no+="$r "; return 1 ;; esac
+}
+# 1. ArgoCD: poll until the synced revision is THIS commit (or contains it) and the app is Synced + Healthy
 deadline=$(( $(date +%s) + TIMEOUT )); rev="?"; health="?"; sync="?"
 while [ "$(date +%s)" -lt "$deadline" ]; do
   argocd app get "$APP" -o json > "$tmp/app.json" 2>/dev/null || { sleep "$POLL"; continue; }
   rev=$(jq -r "$git_sha" "$tmp/app.json")
   health=$(jq -r '.status.health.status // "?"' "$tmp/app.json"); sync=$(jq -r '.status.sync.status // "?"' "$tmp/app.json")
   phase=$(jq -r '.status.operationState.phase // "-"' "$tmp/app.json")
-  if [ "$rev" = "$WANT" ] && [ "$health" = Healthy ] && [ "$sync" = Synced ]; then break; fi
+  if contains_want "$rev" && [ "$health" = Healthy ] && [ "$sync" = Synced ]; then break; fi
   echo "waiting: revision=${rev::7} (want ${WANT::7}) sync=$sync health=$health op=$phase"; sleep "$POLL"
 done
-if [ "$rev" != "$WANT" ] || [ "$health" != Healthy ] || [ "$sync" != Synced ]; then st="validate-failed"; notes+=("ArgoCD: revision ${rev::7} (want ${WANT::7}), sync $sync, health $health after $((TIMEOUT/60)) min"); fi
-echo "- ArgoCD: revision \`${rev::7}\` (want \`${WANT::7}\`), sync **$sync**, health **$health**" >> "$md"
+if ! contains_want "$rev" || [ "$health" != Healthy ] || [ "$sync" != Synced ]; then st="validate-failed"; notes+=("ArgoCD: revision ${rev::7} (want ${WANT::7}), sync $sync, health $health after $((TIMEOUT/60)) min"); fi
+echo "- ArgoCD: revision \`${rev::7}\` (want \`${WANT::7}\`$([ "$rev" != "$WANT" ] && contains_want "$rev" && echo ", contained")), sync **$sync**, health **$health**" >> "$md"
 # the namespace a namespace-less rendered object lands in: the Application's destination
 dest_ns="$DESTINATION_NAMESPACE"
 [ -n "$dest_ns" ] || [ ! -s "$tmp/app.json" ] || dest_ns=$(jq -r '.spec.destination.namespace // ""' "$tmp/app.json" 2>/dev/null || true)
@@ -75,7 +91,7 @@ if [ -n "$KUBECONFIG_CONTENT" ]; then
   export KUBECONFIG="$tmp/kubeconfig"; umask 077; printf '%s' "$KUBECONFIG_CONTENT" > "$KUBECONFIG"
   krev=$(kubectl get application -n argocd "$APP" -o json 2>/dev/null | jq -r '[.status.sync.revision, (.status.sync.revisions // [])[]] | map(select(type=="string" and test("^[0-9a-f]{40}$"))) | .[0] // "?"' 2>/dev/null || echo "?")
   echo "- kubectl: Application \`$APP\` sync.revision \`${krev::7}\`" >> "$md"
-  [ "$krev" = "$WANT" ] || { st="validate-failed"; notes+=("kubectl sees revision ${krev::7}"); }
+  contains_want "$krev" || { st="validate-failed"; notes+=("kubectl sees revision ${krev::7}"); }
   if [ -n "$RENDERED" ] && [ -f "$RENDERED" ]; then
     while IFS='|' read -r kind ns name; do
       [ -n "$name" ] || continue
