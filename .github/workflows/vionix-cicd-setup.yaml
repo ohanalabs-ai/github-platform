@@ -109,6 +109,10 @@ jobs:
       id-token: write
     env:
       CONFIG_STREAM_KEY: ${{ secrets.CONFIG_STREAM_KEY }}
+      # hashicorp/vault-action exportToken exports VAULT_TOKEN only — NOT VAULT_ADDR; the
+      # actions/secrets/vault/* TypeScript reads both (run 38456803148: "VAULT_ADDR must be an
+      # http(s) URL"). Set it once for the job from the input.
+      VAULT_ADDR: ${{ inputs.vault-url }}
     outputs:
       context: ${{ steps.seal.outputs.context }}
       version: ${{ steps.seal.outputs.version }}

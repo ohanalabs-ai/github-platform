@@ -16,7 +16,8 @@
 //           (e.g. from the org secret) and PREFER_EXISTING=true, Vault is not called.
 //   revoke  POST auth/token/revoke-self — end the job's Vault token.
 //
-// Vault access: VAULT_ADDR + VAULT_TOKEN (hashicorp/vault-action with exportToken: true), optional
+// Vault access: VAULT_TOKEN from hashicorp/vault-action (exportToken: true — it does NOT export VAULT_ADDR)
+// + VAULT_ADDR set by the calling workflow (job env from its `vault-url` input), optional
 // VAULT_NAMESPACE. TLS: public CAs only (Node's fetch takes no per-request CA without npm undici).
 import type { Ctx } from "./types.ts";
 import { randomBytes } from "node:crypto";
