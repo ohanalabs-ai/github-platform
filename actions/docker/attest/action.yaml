@@ -77,8 +77,9 @@ inputs:
     required: false
     default: tag:ci
   tailscale-args:
+    description: Extra `tailscale up` flags — never --accept-routes (tailscale/github-action v4 always adds it)
     required: false
-    default: --accept-routes
+    default: ""
   ts-oauth-client-id:
     description: >-
       Tailscale trust-credential client id. With ts-audience = an OIDC federated identity
