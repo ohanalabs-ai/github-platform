@@ -23,3 +23,7 @@ paths:
   .github/workflows/kubernetes-kustomize-devsecops.yaml:
     ignore:
       - 'property "(job_)?workflow_sha" is not defined in object type'
+  # upstream-release-watch.yaml checks out actions/github/{release-watch,run-summary} the same way.
+  .github/workflows/upstream-release-watch.yaml:
+    ignore:
+      - 'property "(job_)?workflow_sha" is not defined in object type'
