@@ -1,0 +1,133 @@
+# 🔭 upstream-release-watch — "has upstream shipped what we are blocked on?" on a schedule, so nobody
+# polls release pages by hand. The CALLER owns a watch list (YAML/JSON, default .github/upstream-watch.yaml):
+#
+#   target: "1.37"                     # {target} placeholder + issue title
+#   label: eks-1.37                    # label of the issues this opens
+#   titleTemplate: "R1 unblocked: {name} {version} supports Kubernetes {target}"
+#   entries:
+#     - name: external-secrets
+#       repo: external-secrets/external-secrets
+#       current: 2.7.0                 # the pin we run (only NEWER releases can unblock)
+#       tagPattern: '^v\d'             # ignore helm-chart-* tags
+#       conditions:                    # match: all (default) | any
+#         - fileMatch: { path: docs/introduction/stability-support.md, pattern: '^\|\s*{minor}\s*\|[^|\n]*{target}' }
+#
+# Conditions: `minVersion` (semver ≥), `notesMatch` (regex on the release body), `fileMatch` (regex on a
+# file at the release tag — or any `repo`/`ref` — e.g. an upstream compat table or CI matrix). Placeholders
+# {version} {minor} {tag} {target} are substituted regex-escaped. Only GA releases count (GitHub's
+# prerelease flag OR a semver suffix like -alpha13) unless `includePrerelease: true`.
+#
+# Outcome: a summary table (✅ met / ⏳ waiting / ❌ error per entry, evidence, links), outputs `results`
+# + `met` (JSON), and for every met entry ONE issue in the caller repo — opened, or updated while open,
+# deduped by a hidden marker `<!-- upstream-release-watch:<name> -->`; a CLOSED issue is never reopened.
+# Logic: actions/github/release-watch/watch.ts (TypeScript via actions/github-script, no npm deps).
+#
+# Caller (thin; products/devsecops-github/capabilities/upstream-release-watch.md):
+#   on: { schedule: [{ cron: "0 9 * * 1" }], workflow_dispatch: {} }
+#   permissions: { contents: read, issues: write }
+#   jobs:
+#     watch:
+#       uses: ohanalabs-ai/github-platform/.github/workflows/upstream-release-watch.yaml@main
+#       with: { watch-file: .github/upstream-watch.yaml }
+name: 🔭 upstream-release-watch
+run-name: 🔭 upstream release watch — ${{ inputs.watch-file }}
+
+on:
+  workflow_call:
+    inputs:
+      watch-file:
+        description: Path of the watch list in the caller repo (.yaml/.yml parsed with yq, .json as JSON).
+        type: string
+        default: .github/upstream-watch.yaml
+      create-issues:
+        description: Open/update one issue per met entry (false = report only).
+        type: boolean
+        default: true
+      fail-on-error:
+        description: Fail the run when an entry could not be evaluated (API error, bad regex). Met/waiting never fail.
+        type: boolean
+        default: true
+      runs-on:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      results:
+        description: JSON array — one object per entry (status met|waiting|error, latest, metVersion, conditions, issue).
+        value: ${{ jobs.watch.outputs.results }}
+      met:
+        description: JSON array of {name, version, url} for the entries whose conditions are met.
+        value: ${{ jobs.watch.outputs.met }}
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: 🔭 watch upstream releases
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      results: ${{ steps.watch.outputs.results }}
+      met: ${{ steps.watch.outputs.met }}
+    steps:
+      - name: 📥 watch list (caller repo)
+        id: list
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: .watch-caller
+          sparse-checkout: ${{ inputs.watch-file }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: 📦 helpers (this reusable's own commit)
+        id: helpers
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .release-watch
+          sparse-checkout: |
+            actions/github/release-watch
+            actions/github/run-summary
+          persist-credentials: false
+
+      - name: 🔭 evaluate the watch list
+        id: watch
+        env:
+          WATCH_FILE: ${{ github.workspace }}/.watch-caller/${{ inputs.watch-file }}
+          CREATE_ISSUES: ${{ inputs.create-issues }}
+          FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.release-watch/actions/github/release-watch/watch.ts`);
+            await run({ core, exec, github, context });
+
+      # Every run publishes what it did, on every outcome (owner rule 2026-10-13) — including a checkout
+      # failure before the helpers exist (inline fallback).
+      - name: 📋 run summary
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          HELPERS: ${{ github.workspace }}/.release-watch/actions/github/run-summary
+          TITLE: 🔭 upstream release watch
+          JOB_STATUS: ${{ job.status }}
+          STEP_OUTCOMES: |
+            📥 watch list=${{ steps.list.outcome }}
+            📦 helpers=${{ steps.helpers.outcome }}
+            🔭 evaluate=${{ steps.watch.outcome }}
+          FACTS: |
+            Watch list=${{ inputs.watch-file }}
+            Issues=${{ inputs.create-issues && 'open/update' || 'report only' }}
+            Met=${{ steps.watch.outputs.met }}
+        with:
+          script: |
+            try {
+              const { default: run } = await import(`${process.env.HELPERS}/summary.ts`);
+              await run({ core, exec, github, context });
+            } catch (err) {
+              await core.summary.addRaw(`## 📋 ${process.env.TITLE} — ${process.env.JOB_STATUS}\n\n${process.env.STEP_OUTCOMES}\n\n(run-summary helper unavailable: ${err.message})\n`, true).write();
+            }
