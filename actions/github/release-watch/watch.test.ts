@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  candidates, combine, compareSemver, decideIssue, evaluateEntry, fill, issueBody, issueTitle, marker,
+  candidates, combine, compareSemver, decideIssue, evaluateEntry, fill, formatMatch, issueBody, issueKey, issueTitle, marker,
   renderSummary, validateList, versionFromTag,
 } from "./watch.ts";
 import type { EntryResult, Release, WatchEntry, WatchList } from "./types.ts";
@@ -148,4 +148,122 @@ test("renderSummary: one row per entry, counts, escaped pipes", () => {
 
 test("issue title: a per-entry template wins over the list's", () => {
   assert.equal(issueTitle(metResult, list, "R1: {name} chart ships {version}"), "R1: argo-cd chart ships 3.6.0");
+});
+
+// ── pre-release track (newerOnly + includePrerelease + info conditions + extract + issuePer: version) ──
+const ciliumReleases = (): Release[] => [
+  rel("v1.21.0-pre.3", {
+    prerelease: true, published_at: "2026-10-02T19:04:57Z",
+    body: "## Docker Manifests\n`quay.io/cilium/cilium:v1.21.0-pre.3@sha256:aaa`\n`quay.io/cilium/operator-aws:v1.21.0-pre.3@sha256:bbb`\n",
+  }),
+  rel("v1.20.2", { published_at: "2026-09-16T01:53:22Z" }),
+  rel("v1.21.0-pre.2", { prerelease: true }),
+  rel("v1.20.0-rc.1", { prerelease: true }),
+  rel("v1.19.8"),
+];
+const ciliumFiles = async (_r: string, ref: string, path: string) => {
+  if (path.endsWith("requirements.rst")) return ref === "v1.21.0-pre.3" ? "* 1.34\n* 1.35\n* 1.36\n* 1.37\n" : "* 1.33\n* 1.36\n";
+  if (path.endsWith("values.yaml")) return 'envoy:\n  image:\n    repository: "quay.io/cilium/cilium-envoy"\n    tag: "v1.39.1-1"\n    pullPolicy: "IfNotPresent"\n    digest: "sha256:ccc"\n';
+  return null;
+};
+const ciliumTrack = (current: string): WatchEntry => ({
+  name: "cilium", repo: "cilium/cilium", current, tagPattern: "^v\\d", includePrerelease: true, newerOnly: true, issuePer: "version",
+  conditions: [
+    { info: true, fileMatch: { path: "Documentation/network/kubernetes/requirements.rst", pattern: "^\\* 1\\.36\\s*$" } },
+    { info: true, fileMatch: { path: "Documentation/network/kubernetes/requirements.rst", pattern: "^\\* 1\\.37\\s*$" } },
+  ],
+  extract: [
+    { label: "cilium", pattern: "`(quay\\.io/cilium/cilium:{tag}@sha256:[0-9a-f]+)`" },
+    { label: "operator-aws", pattern: "`(quay\\.io/cilium/operator-aws:{tag}@sha256:[0-9a-f]+)`" },
+    { label: "envoy", path: "install/kubernetes/cilium/values.yaml", pattern: 'repository: "(quay\\.io/cilium/cilium-envoy)"\\s*\\n\\s*tag: "([^"]+)"[\\s\\S]*?digest: "(sha256:[0-9a-f]+)"', format: "{1}:{2}@{3}" },
+    { label: "missing", pattern: "nope-(\\d+)" },
+  ],
+});
+
+test("newerOnly + includePrerelease: the newest pre-release newer than the pin is met, with facts + extracts", async () => {
+  const r = await evaluateEntry(ciliumTrack("1.19.5"), ciliumReleases(), "1.37", ciliumFiles);
+  assert.equal(r.status, "met");
+  assert.equal(r.metVersion, "1.21.0-pre.3");
+  assert.equal(r.metTag, "v1.21.0-pre.3");
+  assert.equal(r.metPrerelease, true);
+  assert.equal(r.metPublishedAt, "2026-10-02T19:04:57Z");
+  assert.deepEqual(r.conditions.map((c) => [c.kind, c.met, !!c.info]), [["newer", true, false], ["fileMatch", true, true], ["fileMatch", true, true]]);
+  assert.deepEqual(r.extracts?.map((x) => [x.label, x.value]), [
+    ["cilium", "quay.io/cilium/cilium:v1.21.0-pre.3@sha256:aaa"],
+    ["operator-aws", "quay.io/cilium/operator-aws:v1.21.0-pre.3@sha256:bbb"],
+    ["envoy", "quay.io/cilium/cilium-envoy:v1.39.1-1@sha256:ccc"],
+    ["missing", ""],
+  ]);
+});
+
+test("newerOnly: an info fact that is false does not block (a release that drops 1.36 is still news)", async () => {
+  const e = ciliumTrack("1.21.0-pre.3");
+  const rs = [rel("v1.21.0-pre.4", { prerelease: true }), ...ciliumReleases()];
+  const r = await evaluateEntry(e, rs, "1.37", ciliumFiles);
+  assert.equal(r.status, "met");
+  assert.equal(r.metVersion, "1.21.0-pre.4");
+  assert.deepEqual(r.conditions.filter((c) => c.info).map((c) => c.met), [true, false]); // "* 1.33\n* 1.36" fixture
+});
+
+test("newerOnly: nothing newer than the pin → waiting, never falls back to an older release", async () => {
+  const r = await evaluateEntry(ciliumTrack("1.21.0-pre.3"), ciliumReleases(), "1.37", ciliumFiles);
+  assert.equal(r.status, "waiting");
+  assert.equal(r.latest, "1.21.0-pre.3");
+  assert.equal(r.conditions[0].kind, "newer");
+  assert.match(r.conditions[0].detail, /no release newer than 1\.21\.0-pre\.3/);
+});
+
+test("newerOnly: GA after its pre-releases (1.21.0 > 1.21.0-rc.1 > 1.21.0-pre.3)", async () => {
+  const rs = [rel("v1.21.0"), rel("v1.21.0-rc.1", { prerelease: true }), ...ciliumReleases()];
+  const r = await evaluateEntry(ciliumTrack("1.21.0-pre.3"), rs, "1.37", ciliumFiles);
+  assert.equal(r.metVersion, "1.21.0");
+  assert.equal(r.metPrerelease, false);
+});
+
+test("combine: info results never gate; all-info is met only when something was evaluated", () => {
+  assert.equal(combine([{ kind: "newer", met: true, detail: "" }, { kind: "fileMatch", met: false, detail: "", info: true }]), true);
+  assert.equal(combine([{ kind: "fileMatch", met: false, detail: "", info: true }]), true);
+  assert.equal(combine([]), false);
+  assert.equal(combine([{ kind: "minVersion", met: false, detail: "" }, { kind: "fileMatch", met: true, detail: "", info: true }], "any"), false);
+});
+
+test("formatMatch: {n} groups, default group 1, else the whole match", () => {
+  const m = "a:b@c".match(/(\w):(\w)@(\w)/) as RegExpMatchArray;
+  assert.equal(formatMatch(m, "{1}/{2}/{3}"), "a/b/c");
+  assert.equal(formatMatch(m), "a");
+  assert.equal(formatMatch("xyz".match(/y/) as RegExpMatchArray), "y");
+});
+
+test("issuePer: version — one issue per met version; title gets {tag}; body carries date, notes link, facts, extracts", async () => {
+  const list: WatchList = { label: "cilium-track", titleTemplate: "Cilium {version} ({tag}) released", entries: [ciliumTrack("1.19.5")] };
+  const r = await evaluateEntry(list.entries[0], ciliumReleases(), "1.37", ciliumFiles);
+  assert.equal(issueKey(r), "cilium@1.21.0-pre.3");
+  assert.equal(issueTitle(r, list), "Cilium 1.21.0-pre.3 (v1.21.0-pre.3) released");
+  const body = issueBody(r, list);
+  assert.ok(body.startsWith(marker("cilium@1.21.0-pre.3")));
+  assert.match(body, /released: 2026-10-02/);
+  assert.match(body, /release notes: https:\/\/github\.com\/o\/r\/releases\/tag\/v1\.21\.0-pre\.3/);
+  assert.match(body, /\(pre-release\)/);
+  assert.match(body, /ℹ️ yes — `fileMatch`/);
+  assert.match(body, /envoy: `quay\.io\/cilium\/cilium-envoy:v1\.39\.1-1@sha256:ccc`/);
+  assert.match(body, /missing: — not found/);
+  // a closed issue for the previous version does not suppress the new one; the same version is deduped
+  const closedPrev = { number: 7, state: "closed", title: "x", body: `${marker("cilium@1.21.0-pre.2")}\n`, html_url: "u" };
+  assert.deepEqual(decideIssue([closedPrev], issueKey(r), "t", body), { action: "create" });
+  const openSame = { number: 8, state: "open", title: "t", body, html_url: "u" };
+  assert.deepEqual(decideIssue([closedPrev, openSame], issueKey(r), "t", body), { action: "skip", number: 8, reason: "up to date" });
+  // the entry-level key never collides with a version key ("cilium -->" vs "cilium@… -->")
+  assert.deepEqual(decideIssue([openSame], "cilium", "t", body), { action: "create" });
+  const md = renderSummary([r], list, ".github/upstream-watch-cilium.yaml");
+  assert.match(md, /\(pre-release\) · 2026-10-02/);
+  assert.match(md, /📦 operator-aws/);
+});
+
+test("validateList: newerOnly / info / issuePer / extract rules", () => {
+  const ok = { entries: [{ name: "a", repo: "o/r", current: "1.0.0", newerOnly: true }] };
+  assert.deepEqual(validateList(structuredClone(ok)).entries[0].conditions, []);
+  assert.throws(() => validateList({ entries: [{ name: "a", repo: "o/r", newerOnly: true }] }), /newerOnly needs a semver/);
+  assert.throws(() => validateList({ entries: [{ name: "a", repo: "o/r", conditions: [{ info: true, minVersion: "1.0.0" }] }] }), /info-only/);
+  assert.throws(() => validateList({ entries: [{ name: "a", repo: "o/r", current: "1.0.0", newerOnly: true, issuePer: "tag" }] }), /issuePer/);
+  assert.throws(() => validateList({ entries: [{ name: "a", repo: "o/r", current: "1.0.0", newerOnly: true, extract: [{ label: "x" }] }] }), /label \+ pattern/);
 });

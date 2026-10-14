@@ -4,15 +4,19 @@
 //   minVersion  semver ≥ (version extracted from the tag)
 //   notesMatch  regex on the release body
 //   fileMatch   regex on a file fetched at the release tag (or any ref/repo — a compat table, a CI matrix)
+// (a condition marked `info: true` is evaluated and reported but never gates; `newerOnly` makes "a release
+// newer than the pin exists" itself the signal — with `includePrerelease`, a nightly pre-release track),
+// pull `extract` values (image digests, …) out of the notes or a file at the tag,
 // — then publish a summary table + a JSON output, and for every entry whose conditions are met open
-// (or update, deduped by a hidden marker) ONE issue in the caller repo. Never closes or reopens an
+// (or update, deduped by a hidden marker) ONE issue in the caller repo — per entry, or per met version
+// with `issuePer: version`. Never closes or reopens an
 // issue: a closed one means a human acknowledged it.
 //
 // env: WATCH_FILE (path to the list), ISSUE_REPO (owner/name; default the run's repo),
 //      CREATE_ISSUES ("true"/"false"), FAIL_ON_ERROR ("true"/"false")
 import { readFileSync } from "node:fs";
 import type {
-  Candidate, Condition, ConditionResult, Ctx, EntryResult, Release, WatchEntry, WatchList,
+  Candidate, Condition, ConditionResult, Ctx, EntryResult, Extract, Extracted, Release, WatchEntry, WatchList,
 } from "./types.ts";
 
 export const MARKER_PREFIX = "upstream-release-watch";
@@ -84,7 +88,7 @@ export function candidates(releases: Release[], e: Pick<WatchEntry, "tagPattern"
     const version = versionFromTag(r.tag_name);
     if (!version || !parseSemver(version)) continue;
     if (!e.includePrerelease && isPrerelease(r, version)) continue;
-    out.push({ tag: r.tag_name, version, url: r.html_url, body: r.body ?? "", publishedAt: r.published_at ?? "" });
+    out.push({ tag: r.tag_name, version, url: r.html_url, body: r.body ?? "", publishedAt: r.published_at ?? "", prerelease: isPrerelease(r, version) });
   }
   return out.sort((a, b) => compareSemver(b.version, a.version));
 }
@@ -93,6 +97,13 @@ export function candidates(releases: Release[], e: Pick<WatchEntry, "tagPattern"
 export type FileFetcher = (repo: string, ref: string, path: string) => Promise<string | null>;
 
 export async function evalCondition(
+  cond: Condition, c: Candidate, e: WatchEntry, target: string, fetchFile: FileFetcher,
+): Promise<ConditionResult> {
+  const r = await evalConditionRaw(cond, c, e, target, fetchFile);
+  return cond.info ? { ...r, info: true } : r;
+}
+
+async function evalConditionRaw(
   cond: Condition, c: Candidate, e: WatchEntry, target: string, fetchFile: FileFetcher,
 ): Promise<ConditionResult> {
   const vars = varsFor(c, target, e.name);
@@ -119,9 +130,34 @@ export async function evalCondition(
   throw new Error(`entry ${e.name}: a condition needs one of minVersion | notesMatch | fileMatch`);
 }
 
+// `info` results never gate. With no gating condition left (a `newerOnly` entry), the candidate's
+// existence is the signal — but an empty result list (nothing evaluated) is never met.
 export function combine(results: ConditionResult[], match: "all" | "any" = "all"): boolean {
   if (!results.length) return false;
-  return match === "any" ? results.some((r) => r.met) : results.every((r) => r.met);
+  const gating = results.filter((r) => !r.info);
+  if (!gating.length) return true;
+  return match === "any" ? gating.some((r) => r.met) : gating.every((r) => r.met);
+}
+
+// ── extracts ────────────────────────────────────────────────────────────────────────────────────
+export function formatMatch(m: RegExpMatchArray, format?: string): string {
+  if (format) return format.replace(/\{(\d+)\}/g, (_, i: string) => m[+i] ?? "");
+  return m[1] ?? m[0];
+}
+
+export async function evalExtract(x: Extract, c: Candidate, e: WatchEntry, target: string, fetchFile: FileFetcher): Promise<Extracted> {
+  const vars = varsFor(c, target, e.name);
+  const re = new RegExp(fill(x.pattern, vars, true), "m");
+  let text: string | null = c.body;
+  let source = `release notes of ${c.tag}`;
+  if (x.path) {
+    const repo = x.repo || e.repo;
+    const ref = fill(x.ref || "{tag}", vars, false);
+    source = `${repo}@${ref}:${x.path}`;
+    text = await fetchFile(repo, ref, x.path);
+  }
+  const m = text === null ? null : text.match(re);
+  return { label: x.label, value: m ? formatMatch(m, x.format) : "", source };
 }
 
 export async function evaluateEntry(
@@ -131,21 +167,32 @@ export async function evaluateEntry(
     name: e.name, repo: e.repo, current: e.current ?? "", latest: "", latestUrl: "", status: "waiting",
     metVersion: "", metUrl: "", conditions: [], note: e.note ?? "", error: "",
   };
+  if (e.issuePer) base.issuePer = e.issuePer;
+  const kind = e.includePrerelease ? "release" : "GA release";
   const cands = candidates(releases, e);
-  if (!cands.length) return { ...base, conditions: [{ kind: "minVersion", met: false, detail: "no GA release matches" }] };
+  if (!cands.length) return { ...base, conditions: [{ kind: "minVersion", met: false, detail: `no ${kind} matches` }] };
   base.latest = cands[0].version;
   base.latestUrl = cands[0].url;
   // only releases newer than what we run can unblock us (a pin that already satisfies it is not news)
-  const fresh = e.current && parseSemver(versionFromTag(e.current) || e.current)
-    ? cands.filter((c) => compareSemver(c.version, versionFromTag(e.current as string) || (e.current as string)) > 0)
-    : cands;
+  const pin = e.current ? versionFromTag(e.current) || e.current : "";
+  const fresh = pin && parseSemver(pin) ? cands.filter((c) => compareSemver(c.version, pin) > 0) : cands;
+  if (e.newerOnly && !fresh.length) {
+    return { ...base, conditions: [{ kind: "newer", met: false, detail: `no ${kind} newer than ${e.current} (latest ${cands[0].version})` }] };
+  }
   const pool = (fresh.length ? fresh : cands).slice(0, Math.max(1, e.maxCandidates ?? 3));
   let firstEval: ConditionResult[] = [];
   for (const c of pool) {
-    const res: ConditionResult[] = [];
-    for (const cond of e.conditions) res.push(await evalCondition(cond, c, e, target, fetchFile));
+    const res: ConditionResult[] = e.newerOnly ? [{ kind: "newer", met: true, detail: `${c.version} > ${e.current}` }] : [];
+    for (const cond of e.conditions ?? []) res.push(await evalCondition(cond, c, e, target, fetchFile));
     if (!firstEval.length) firstEval = res;
-    if (combine(res, e.match)) return { ...base, status: "met", metVersion: c.version, metUrl: c.url, conditions: res };
+    if (combine(res, e.match)) {
+      const extracts: Extracted[] = [];
+      for (const x of e.extract ?? []) extracts.push(await evalExtract(x, c, e, target, fetchFile));
+      return {
+        ...base, status: "met", metVersion: c.version, metUrl: c.url, metTag: c.tag, metPublishedAt: c.publishedAt,
+        metPrerelease: !!c.prerelease, conditions: res, ...(extracts.length ? { extracts } : {}),
+      };
+    }
   }
   return { ...base, conditions: firstEval };
 }
@@ -162,8 +209,19 @@ export function validateList(raw: unknown): WatchList {
     if (seen.has(e.name)) throw new Error(`${at}: duplicate name`);
     seen.add(e.name);
     if (!/^[\w.-]+\/[\w.-]+$/.test(e.repo ?? "")) throw new Error(`${at}: repo must be owner/name`);
-    if (!Array.isArray(e.conditions) || !e.conditions.length) throw new Error(`${at}: conditions must be a non-empty list`);
+    if (e.newerOnly && (e.current === undefined || !parseSemver(versionFromTag(String(e.current)) || String(e.current)))) throw new Error(`${at}: newerOnly needs a semver \`current\``);
+    if (e.conditions === undefined && e.newerOnly) e.conditions = [];
+    if (!Array.isArray(e.conditions) || (!e.conditions.length && !e.newerOnly)) throw new Error(`${at}: conditions must be a non-empty list (or set newerOnly)`);
+    if (!e.newerOnly && e.conditions.length && e.conditions.every((c: Condition) => c?.info)) throw new Error(`${at}: every condition is info-only — add a gating condition or set newerOnly`);
     if (e.match && !["all", "any"].includes(e.match)) throw new Error(`${at}: match must be all|any`);
+    if (e.issuePer && !["entry", "version"].includes(e.issuePer)) throw new Error(`${at}: issuePer must be entry|version`);
+    if (e.extract !== undefined) {
+      if (!Array.isArray(e.extract)) throw new Error(`${at}: extract must be a list`);
+      for (const x of e.extract) {
+        if (!x?.label || !x?.pattern) throw new Error(`${at}: each extract needs label + pattern`);
+        new RegExp(x.pattern);
+      }
+    }
     for (const c of e.conditions) {
       const kinds = ["minVersion", "notesMatch", "fileMatch"].filter((k) => c?.[k] !== undefined);
       if (kinds.length !== 1) throw new Error(`${at}: each condition needs exactly one of minVersion | notesMatch | fileMatch`);
@@ -186,36 +244,60 @@ export function renderSummary(results: EntryResult[], list: WatchList, file: str
   const md = [
     `## 🔭 upstream release watch${list.target ? ` — Kubernetes ${list.target}` : ""}`, "",
     `\`${file}\` · ${results.length} watched · **${met} ✅ met** · ${results.length - met - err} ⏳ waiting${err ? ` · ${err} ❌ error` : ""}`, "",
-    "| | Name | Current | Latest GA | Met by | Evidence | Issue |", "|---|---|---|---|---|---|---|",
+    "| | Name | Current | Latest | Met by | Evidence | Issue |", "|---|---|---|---|---|---|---|",
   ];
   for (const r of results) {
     const latest = r.latest ? `[${r.latest}](${r.latestUrl})` : "—";
-    const metBy = r.metVersion ? `[${r.metVersion}](${r.metUrl})` : "—";
-    const evidence = r.error ? `error: ${r.error}` : r.conditions.map((c) => `${c.met ? "✅" : "⏳"} ${c.detail}`).join("<br>");
+    const metBy = r.metVersion ? `[${r.metVersion}](${r.metUrl})${r.metPrerelease ? " (pre-release)" : ""}${r.metPublishedAt ? ` · ${r.metPublishedAt.slice(0, 10)}` : ""}` : "—";
+    const evidence = r.error ? `error: ${r.error}` : [
+      ...r.conditions.map((c) => `${conditionIcon(c)} ${c.detail}`),
+      ...(r.extracts ?? []).map((x) => `📦 ${x.label}: ${x.value ? `\`${x.value}\`` : "— (not found)"}`),
+    ].join("<br>");
     md.push(`| ${ICON[r.status]} | **${cell(r.name)}** ([${r.repo}](https://github.com/${r.repo}/releases)) | ${cell(r.current || "—")} | ${latest} | ${metBy} | ${cell(evidence)}${r.note ? `<br>_${cell(r.note)}_` : ""} | ${cell(r.issue || "—")} |`);
   }
   md.push("");
   return md.join("\n");
 }
 
-export function marker(name: string): string {
-  return `<!-- ${MARKER_PREFIX}:${name} -->`;
+// ✅/⏳ for a gating condition; ℹ️ yes/no for an info-only one (it is a fact, not a wait)
+export function conditionIcon(c: { met: boolean; info?: boolean }): string {
+  return c.info ? (c.met ? "ℹ️ yes —" : "ℹ️ no —") : c.met ? "✅" : "⏳";
+}
+
+// The dedupe key: the entry name, or `name@version` with issuePer: version (one issue per new release).
+export function issueKey(r: Pick<EntryResult, "name" | "metVersion" | "issuePer">): string {
+  return r.issuePer === "version" ? `${r.name}@${r.metVersion}` : r.name;
+}
+
+export function marker(key: string): string {
+  return `<!-- ${MARKER_PREFIX}:${key} -->`;
 }
 
 export function issueTitle(r: EntryResult, list: WatchList, entryTemplate = ""): string {
-  return fill(entryTemplate || list.titleTemplate || DEFAULT_TITLE, { name: r.name, version: r.metVersion, target: list.target ?? "", tag: "", minor: "" }, false);
+  const s = parseSemver(r.metVersion);
+  return fill(entryTemplate || list.titleTemplate || DEFAULT_TITLE, {
+    name: r.name, version: r.metVersion, target: list.target ?? "", tag: r.metTag ?? "", minor: s ? `${s.major}.${s.minor}` : "",
+  }, false);
 }
 
 // Stable across runs (no run URL / timestamp) so an unchanged finding does not churn the open issue.
 export function issueBody(r: EntryResult, list: WatchList, source = "the upstream release watcher"): string {
+  const extracts = r.extracts ?? [];
   return [
-    marker(r.name), "",
-    `**${r.name}** (\`${r.repo}\`) shipped **[${r.metVersion}](${r.metUrl})**, which meets the watch condition${list.target ? ` for Kubernetes ${list.target}` : ""}.`, "",
+    marker(issueKey(r)), "",
+    `**${r.name}** (\`${r.repo}\`) shipped **[${r.metVersion}](${r.metUrl})**${r.metPrerelease ? " (pre-release)" : ""}, which meets the watch condition${list.target ? ` for Kubernetes ${list.target}` : ""}.`, "",
+    ...(r.metTag ? [`- tag: \`${r.metTag}\``] : []),
+    ...(r.metPublishedAt ? [`- released: ${r.metPublishedAt.slice(0, 10)}`] : []),
+    `- release notes: ${r.metUrl}`,
     `- current pin: \`${r.current || "—"}\``,
-    `- latest GA: [${r.latest}](${r.latestUrl})`,
+    `- latest: [${r.latest}](${r.latestUrl})`,
     ...(r.note ? [`- note: ${r.note}`] : []), "",
     "**Evidence**", "",
-    ...r.conditions.map((c) => `- ${c.met ? "✅" : "⏳"} \`${c.kind}\` — ${c.detail}`), "",
+    ...r.conditions.map((c) => `- ${conditionIcon(c)} \`${c.kind}\` — ${c.detail}`), "",
+    ...(extracts.length ? [
+      "**Extracted**", "",
+      ...extracts.map((x) => `- ${x.label}: ${x.value ? `\`${x.value}\`` : "— not found"} _(from ${x.source})_`), "",
+    ] : []),
     `Detected by ${source}. This issue is updated while it stays open; close it once the bump is planned — a closed issue is never reopened.`,
   ].join("\n");
 }
@@ -247,9 +329,9 @@ async function ensureLabel(github: any, owner: string, repo: string, label: stri
 
 export type IssueAction = { action: "create" } | { action: "update"; number: number } | { action: "skip"; number: number; reason: string };
 
-// Pure decision: one issue per entry name, ever. Open → update (if changed); closed → leave alone.
-export function decideIssue(existing: Issue[], name: string, title: string, body: string): IssueAction {
-  const mine = existing.filter((i) => (i.body ?? "").includes(marker(name)));
+// Pure decision: one issue per key (entry name, or name@version), ever. Open → update (if changed); closed → leave alone.
+export function decideIssue(existing: Issue[], key: string, title: string, body: string): IssueAction {
+  const mine = existing.filter((i) => (i.body ?? "").includes(marker(key)));
   const open = mine.find((i) => i.state === "open");
   if (open) return open.title === title && (open.body ?? "") === body ? { action: "skip", number: open.number, reason: "up to date" } : { action: "update", number: open.number };
   const closed = mine[0];
@@ -321,7 +403,7 @@ export default async function run({ core, exec, github, context }: Ctx): Promise
       }
       const r = await evaluateEntry(e, releases, target, fetchFile);
       results.push(r);
-      core.info(`${r.status === "met" ? "✅" : "⏳"} ${e.name}: latest GA ${r.latest || "—"}${r.metVersion ? `, met by ${r.metVersion}` : ""}`);
+      core.info(`${r.status === "met" ? "✅" : "⏳"} ${e.name}: latest ${r.latest || "—"}${r.metVersion ? `, met by ${r.metVersion}` : ""}`);
     } catch (err) {
       const msg = (err as Error).message;
       core.warning(`${e.name}: ${msg}`);
@@ -337,7 +419,7 @@ export default async function run({ core, exec, github, context }: Ctx): Promise
       for (const r of met) {
         const title = issueTitle(r, list, list.entries.find((x) => x.name === r.name)?.titleTemplate);
         const body = issueBody(r, list, source);
-        const a = decideIssue(existing, r.name, title, body);
+        const a = decideIssue(existing, issueKey(r), title, body);
         if (a.action === "create") {
           if (!labelReady) { await ensureLabel(github, owner, repo, label); labelReady = true; }
           const { data } = await github.rest.issues.create({ owner, repo, title, body, labels: [label] });

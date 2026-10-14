@@ -16,10 +16,15 @@
 # file at the release tag — or any `repo`/`ref` — e.g. an upstream compat table or CI matrix). Placeholders
 # {version} {minor} {tag} {target} are substituted regex-escaped. Only GA releases count (GitHub's
 # prerelease flag OR a semver suffix like -alpha13) unless `includePrerelease: true`.
+# A version TRACK (e.g. nightly, pre-releases included): `newerOnly: true` (a release newer than `current`
+# is itself the signal — never an older one), conditions marked `info: true` (reported yes/no, never
+# gating — "requirements.rst lists 1.36?"), `extract` (values pulled from the notes or a file at the tag —
+# image digests) and `issuePer: version` (one issue per new release instead of one per entry).
 #
 # Outcome: a summary table (✅ met / ⏳ waiting / ❌ error per entry, evidence, links), outputs `results`
 # + `met` (JSON), and for every met entry ONE issue in the caller repo — opened, or updated while open,
-# deduped by a hidden marker `<!-- upstream-release-watch:<name> -->`; a CLOSED issue is never reopened.
+# deduped by a hidden marker `<!-- upstream-release-watch:<name>[@<version>] -->`; a CLOSED issue is
+# never reopened.
 # Logic: actions/github/release-watch/watch.ts (TypeScript via actions/github-script, no npm deps).
 #
 # Caller (thin; products/devsecops-github/capabilities/upstream-release-watch.md):

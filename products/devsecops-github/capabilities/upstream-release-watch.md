@@ -5,7 +5,7 @@
 
 "Has upstream shipped what we are blocked on?" — answered on a schedule, so nobody polls release
 pages by hand. The caller owns a **watch list**; the reusable reads each entry's GitHub Releases
-(`repos.listReleases`, up to 300), keeps the **GA** ones whose tag matches, evaluates the entry's
+(`repos.listReleases`, up to 300), keeps the **GA** ones (or all, with `includePrerelease`) whose tag matches, evaluates the entry's
 conditions against the newest few releases **newer than the caller's current pin**, and reports.
 
 ## Caller
@@ -60,6 +60,45 @@ entries:
           # ref: main          (default: "{tag}" — the release's tag)
 ```
 
+### Version track (pre-releases, nightly)
+
+The same reusable follows **every new release** of a project — pre-releases included — instead of
+waiting for one that meets a compat condition. First caller: `planeodev/planeo-infra`
+`.github/upstream-watch-cilium.yaml` (nightly).
+
+```yaml
+label: cilium-track
+titleTemplate: "Cilium {version} released ({tag})"
+entries:
+  - name: cilium
+    repo: cilium/cilium
+    current: 1.19.5                # the pin — only a NEWER release can be met
+    tagPattern: '^v\d'
+    includePrerelease: true        # -pre.N / -rc.N count (1.21.0-pre.3 < 1.21.0-rc.0 < 1.21.0)
+    newerOnly: true                # "a release newer than current exists" IS the signal; never an older one
+    issuePer: version              # one issue per new release (marker cilium@1.21.0-pre.4), not one per entry
+    conditions:                    # optional with newerOnly; info: true = reported yes/no, never gating
+      - info: true
+        fileMatch: { path: Documentation/network/kubernetes/requirements.rst, pattern: '^\* 1\.37\s*$' }
+    extract:                       # values shown in the summary + issue ("—" when absent; never fails)
+      - label: cilium image
+        pattern: '`(quay\.io/cilium/cilium:{tag}@sha256:[0-9a-f]+)`'   # from the release notes
+      - label: envoy image
+        path: install/kubernetes/cilium/values.yaml                     # or a file at the tag
+        pattern: 'repository: "(quay\.io/cilium/cilium-envoy)"\s*\n\s*tag: "([^"]+)"[\s\S]*?digest: "(sha256:[0-9a-f]+)"'
+        format: "{1}:{2}@{3}"      # capture groups; default group 1, else the whole match
+```
+
+| Key | |
+|---|---|
+| `newerOnly` | needs a semver `current`; nothing newer → ⏳ waiting (`newer` evidence row), never a fallback to an older release. `conditions` may be omitted |
+| `info: true` (on a condition) | evaluated and shown as `ℹ️ yes/no`; excluded from `match`. A list where every condition is info-only needs `newerOnly` |
+| `extract[]` | `label`, `pattern` (regex, `m`, placeholders), optional `path`/`repo`/`ref` (default the notes; `ref` default `{tag}`), optional `format` |
+| `issuePer` | `entry` (default) or `version` — the dedupe key becomes `<name>@<version>`, so each new release opens its own issue, a closed one for an older version does not suppress it |
+
+Only the **newest** met release per run is reported (a run that sees two new pre-releases opens one
+issue, for the newest). Bump `current` when you move the pin.
+
 Placeholders `{version}` `{minor}` `{tag}` `{target}` are substituted **regex-escaped** in patterns
 (raw in `ref` and titles). The version is the first `x.y[.z][-pre]` in the tag (`v1.20.2`,
 `argo-cd-10.10.3`, `policy-controller-0.10.8`), and releases are ordered by semver, not by publish
@@ -68,7 +107,9 @@ date (a `v1.20.4` patch published after `v1.21.2` is not "latest").
 ## Notification
 
 For every **met** entry the reusable keeps exactly one issue in the caller repo, found by the hidden
-marker `<!-- upstream-release-watch:<name> -->` among issues carrying the label:
+marker `<!-- upstream-release-watch:<name> -->` (`<name>@<version>` with `issuePer: version`) among
+issues carrying the label. The body carries the tag, release date, release-notes link, the current pin,
+the per-condition evidence and any `extract` values:
 
 - none → **opened** (label created if missing);
 - open → **updated** when the title/body changed (the body carries no run URL, so a stable finding does not churn);
@@ -79,7 +120,7 @@ watchers; there is no Slack or Jira write from CI.
 
 ## Run summary
 
-Always published: the 🔭 table (✅ met / ⏳ waiting / ❌ error, current pin, latest GA, the release that
-met it, per-condition evidence, the issue action) plus the 📋 step-outcome table (`if: always()`, with
+Always published: the 🔭 table (✅ met / ⏳ waiting / ❌ error, current pin, latest, the release that
+met it + its date + pre-release flag, per-condition evidence (ℹ️ for info facts), 📦 extracts, the issue action) plus the 📋 step-outcome table (`if: always()`, with
 an inline fallback if the helpers checkout itself failed). An invalid watch list fails with its own
 summary section naming the problem.
