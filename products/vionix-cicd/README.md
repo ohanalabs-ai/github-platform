@@ -104,6 +104,13 @@ jobs:
       # sealed values are now masked env vars; the readable part: fromJSON(needs.setup.outputs.context).plain
 ```
 
+## Supply-chain evidence (design)
+
+Ledgers (Vionix private Rekor from Day 1; public Sigstore Rekor for public repositories — one
+interface), the evidence "fact", who owns what (Vionix owns signing identity, evidence, policy bundle;
+consumers enforce), the signing-token TTL parameter, and Kubernetes-repo image scanning (PR = changed
+render origins only, nightly = all): [`DESIGN-supply-chain-evidence.md`](DESIGN-supply-chain-evidence.md).
+
 ## Status and follow-ups
 
 - 🐤 The chain is proven on demand by the signing canary ([devsecops-docker → Signing canary](../devsecops-docker/README.md#signing-canary--prove-an-orgs-chain-or-sign-any-digest)): build → scan → attest → public-key verify, or sign any digest.
