@@ -30,6 +30,17 @@ export interface Condition {
   minVersion?: string; // semver ≥ (the release's version, extracted from its tag)
   notesMatch?: string; // regex (flags im) on the release body
   fileMatch?: FileMatch;
+  info?: boolean; // evaluated and reported (summary + issue) but never gates "met" — e.g. "lists 1.36?"
+}
+// A value pulled out of the release (notes, or a file at the tag) and shown in the summary/issue — e.g.
+// an image digest. Not a condition: a missing match is reported as "—", it never fails the entry.
+export interface Extract {
+  label: string;
+  pattern: string; // regex (flag m), placeholders allowed; matched against the notes, or `path` if set
+  path?: string; // a file at `ref` (default "{tag}") in `repo` (default the entry's repo)
+  repo?: string;
+  ref?: string;
+  format?: string; // "{1}@{2}" — capture groups; default: group 1, else the whole match
 }
 export interface WatchEntry {
   name: string;
@@ -39,6 +50,9 @@ export interface WatchEntry {
   includePrerelease?: boolean; // default false: GitHub's prerelease flag OR a semver pre-release suffix
   match?: "all" | "any"; // how conditions combine (default all)
   conditions: Condition[];
+  newerOnly?: boolean; // only a release newer than `current` can be met (no fallback to older ones); needs `current`
+  issuePer?: "entry" | "version"; // dedupe key of the issue: one per entry (default) or one per met version
+  extract?: Extract[]; // values shown in the summary/issue for the met release (digests, …)
   maxCandidates?: number; // newest GA releases evaluated (default 3)
   note?: string; // free text shown in the summary/issue (stepping stones, gates)
   titleTemplate?: string; // per-entry issue title (default: the list's)
@@ -66,12 +80,15 @@ export interface Candidate {
   url: string;
   body: string;
   publishedAt: string;
+  prerelease?: boolean;
 }
 export interface ConditionResult {
-  kind: "minVersion" | "notesMatch" | "fileMatch";
+  kind: "minVersion" | "notesMatch" | "fileMatch" | "newer";
   met: boolean;
   detail: string;
+  info?: boolean; // reported only, never gated
 }
+export interface Extracted { label: string; value: string; source: string }
 export type Status = "met" | "waiting" | "error";
 export interface EntryResult {
   name: string;
@@ -82,6 +99,11 @@ export interface EntryResult {
   status: Status;
   metVersion: string; // the newest release that satisfies the conditions ("" when none)
   metUrl: string;
+  metTag?: string;
+  metPublishedAt?: string; // ISO date of the met release
+  metPrerelease?: boolean;
+  extracts?: Extracted[]; // for the met release
+  issuePer?: "entry" | "version";
   conditions: ConditionResult[]; // for the met release, else for the latest evaluated
   note: string;
   error: string;
