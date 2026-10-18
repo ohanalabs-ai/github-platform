@@ -43,9 +43,9 @@ inputs:
     required: false
     default: ""
   fail-on-failure:
-    description: "Fail this step when a report has failed/errored cases or cannot be parsed (default: report only — the test step's own exit code gates the job)"
+    description: "Fail this step when a report has failed/errored cases or cannot be parsed (default: true — a failing test breaks the job; set \"false\" only to render a report you gate elsewhere)"
     required: false
-    default: "false"
+    default: "true"
   fail-on-empty:
     description: "Fail this step when no report file matched `paths` (default: warn)"
     required: false

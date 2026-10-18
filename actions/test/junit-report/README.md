@@ -46,7 +46,7 @@ a `JUNIT-*` one.
 | `collapse` | `true` | Fold the per-case table in the comment |
 | `check-run` | `false` | Create a check run with annotations (needs `checks: write`) |
 | `check-name` | `title` | |
-| `fail-on-failure` | `false` | Fail the step on failed/errored cases or an unreadable report. Default: report only — the test step's own exit code gates the job |
+| `fail-on-failure` | `true` | Fail the step on failed/errored cases or an unreadable report — **a failing test breaks the job**. Set `"false"` only to render a report whose gate lives elsewhere |
 | `fail-on-empty` | `false` | Fail when nothing matched (default: warning) |
 | `artifact-name` | `test-results` | Raw-report artifact; `''` = no upload. Unique per run — add the matrix leg |
 | `artifact-retention-days` | `''` | Repository default when empty |
