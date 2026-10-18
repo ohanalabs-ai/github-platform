@@ -1,0 +1,142 @@
+# 🧪 End-to-end self-test of the test-report composites (actions/test/junit-report,
+# actions/test/coverage-report) on THIS repo's pull requests: the unit tests run in
+# actions-typescript-selftest.yaml; this runs the composites themselves, as a caller would
+# (`uses: ./actions/test/...`), against the committed fixtures — real Kyverno Chainsaw v0.2.15
+# JUNIT-TEST / JUNIT-STEP / JUNIT-OPERATION reports, pytest + surefire JUnit, TAP, and Cobertura /
+# JaCoCo / LCOV / Go coverage — then asserts their outputs, the fail-on-failure gate and the
+# no-match path. On a pull_request it also leaves the two sticky comments (+ the coverage check
+# run), so the reviewer sees exactly what a consumer gets. No docker, no cluster, no secrets.
+name: 🧪 test-reports-selftest
+run-name: "🧪 test-report composites self-test — ${{ github.event.pull_request.title || github.ref_name }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/test-reports-selftest.yaml"
+      - "actions/test/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-reports-selftest.yaml"
+      - "actions/test/**"
+
+permissions:
+  contents: read
+  pull-requests: write   # the sticky comments (fork PRs: read-only token → the composites warn, still pass)
+  checks: write          # the check runs
+
+jobs:
+  lint:
+    name: 🚨 actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: ⚙️ actionlint (this workflow)
+        run: docker run --rm -v "$PWD":/repo --workdir /repo rhysd/actionlint:1.7.12 -color .github/workflows/test-reports-selftest.yaml
+
+  e2e:
+    name: ✅ composites on fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: ✅ Chainsaw JUnit (JUNIT-TEST + JUNIT-STEP + JUNIT-OPERATION)
+        id: chainsaw
+        uses: ./actions/test/junit-report
+        with:
+          paths: actions/test/fixtures/junit/chainsaw-junit-*.xml
+          title: "🧪 selftest · Chainsaw JUnit"
+          command: chainsaw test tests/chainsaw --report-format JUNIT-TEST --report-path reports --report-name chainsaw
+          # no check-run here: the fixtures fail ON PURPOSE, and a red check on every PR touching
+          # actions/test reads like a broken build (the annotated failure check run was verified on
+          # https://github.com/ohanalabs-ai/github-platform/pull/59 — 3 annotations). The coverage step
+          # below exercises the check-run path with a passing conclusion.
+          artifact-name: selftest-chainsaw-junit
+          artifact-retention-days: "3"
+
+      - name: ✅ every other test format (pytest, surefire, TAP) — no comment
+        id: others
+        uses: ./actions/test/junit-report
+        with:
+          paths: |
+            actions/test/fixtures/junit/pytest.xml
+            actions/test/fixtures/junit/surefire.xml
+            actions/test/fixtures/tap/
+          title: "🧪 selftest · pytest + surefire + TAP"
+          comment: "false"
+          artifact-name: ""
+
+      - name: ❌ fail-on-failure gates a failing report
+        id: gate
+        continue-on-error: true
+        uses: ./actions/test/junit-report
+        with:
+          paths: actions/test/fixtures/junit/chainsaw-junit-test.xml
+          title: "🧪 selftest · gate"
+          comment: "false"
+          fail-on-failure: "true"
+          artifact-name: ""
+
+      - name: ⚪ no report matched — warns, does not fail
+        id: empty
+        uses: ./actions/test/junit-report
+        with:
+          paths: does/not/exist/*.xml
+          title: "🧪 selftest · empty"
+          comment: "false"
+
+      - name: ☂️ coverage (Cobertura + JaCoCo + LCOV + Go)
+        id: coverage
+        uses: ./actions/test/coverage-report
+        with:
+          paths: actions/test/fixtures/coverage/
+          title: "☂️ selftest · coverage"
+          thresholds: "70 85"
+          check-run: "true"
+          artifact-name: selftest-coverage
+          artifact-retention-days: "3"
+
+      - name: 🔎 assert the composites' outputs
+        if: always()
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CHAINSAW: ${{ toJSON(steps.chainsaw.outputs) }}
+          OTHERS: ${{ toJSON(steps.others.outputs) }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+          EMPTY: ${{ toJSON(steps.empty.outputs) }}
+          EMPTY_OUTCOME: ${{ steps.empty.outcome }}
+          COVERAGE: ${{ toJSON(steps.coverage.outputs) }}
+        with:
+          script: |
+            const j = (k) => JSON.parse(process.env[k] || '{}');
+            const checks = [
+              // chainsaw: JUNIT-TEST 2 cases + JUNIT-STEP 6 + JUNIT-OPERATION 8, one failure in each
+              ['chainsaw total', j('CHAINSAW').total, '16'],
+              ['chainsaw failed', j('CHAINSAW').failed, '3'],
+              ['chainsaw conclusion', j('CHAINSAW').conclusion, 'failure'],
+              ['chainsaw files', j('CHAINSAW').files, '3'],
+              // pytest 5 (2 pass, 1 fail, 1 error, 1 skip) + surefire 3 (1 fail) + TAP 4 (1 fail, 2 skip)
+              ['others total', j('OTHERS').total, '12'],
+              ['others failed', j('OTHERS').failed, '3'],
+              ['others errors', j('OTHERS').errors, '1'],
+              ['others skipped', j('OTHERS').skipped, '3'],
+              ['gate outcome', process.env.GATE_OUTCOME, 'failure'],
+              ['empty outcome', process.env.EMPTY_OUTCOME, 'success'],
+              ['empty conclusion', j('EMPTY').conclusion, 'neutral'],
+              ['coverage files', j('COVERAGE').files, '4'],
+              ['coverage line-rate', j('COVERAGE')['line-rate'], '71.43'],
+              ['coverage branch-rate', j('COVERAGE')['branch-rate'], '66.67'],
+              ['coverage health', j('COVERAGE').health, 'warning'],
+              ['coverage below-min', j('COVERAGE')['below-min'], 'false'],
+            ];
+            const rows = checks.map(([n, got, want]) => `| ${n} | \`${got}\` | \`${want}\` | ${got === want ? '✅' : '❌'} |`);
+            const bad = checks.filter(([, got, want]) => got !== want);
+            await core.summary.addRaw(['## 🔎 test-report composites — output assertions', '',
+              '| Check | Got | Expected | |', '|---|---|---|---|', ...rows, '',
+              bad.length ? `**❌ ${bad.length} mismatch(es)**` : '**✅ all outputs as expected**', ''].join('\n'), true).write();
+            if (bad.length) core.setFailed(bad.map(([n, g, w]) => `${n}: got ${g}, want ${w}`).join('; '));

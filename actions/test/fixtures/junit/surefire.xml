@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maven surefire: a single <testsuite> root, properties, CDATA bodies, system-out -->
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0" name="dev.planeo.CalculatorTest" time="0.052" tests="3" errors="0" skipped="0" failures="1">
+  <properties>
+    <property name="java.version" value="21"/>
+  </properties>
+  <testcase name="adds" classname="dev.planeo.CalculatorTest" time="0.001"/>
+  <testcase name="subtracts" classname="dev.planeo.CalculatorTest" time="0.002"/>
+  <testcase name="divides by zero" classname="dev.planeo.CalculatorTest" time="0.049">
+    <failure message="expected: &lt;Infinity&gt; but was: &lt;NaN&gt;" type="org.opentest4j.AssertionFailedError"><![CDATA[org.opentest4j.AssertionFailedError: expected: <Infinity> but was: <NaN>
+	at dev.planeo.CalculatorTest.dividesByZero(CalculatorTest.java:27)
+]]></failure>
+    <system-out><![CDATA[dividing 1 by 0 ``` fence breaker]]></system-out>
+  </testcase>
+</testsuite>

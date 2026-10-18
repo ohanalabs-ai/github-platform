@@ -1,0 +1,127 @@
+name: ✅ test/junit-report
+description: >-
+  Publish test results from JUnit XML (pytest, surefire, jest-junit, gotestsum, Kyverno Chainsaw
+  JUNIT-TEST/JUNIT-STEP/JUNIT-OPERATION, …) or TAP files written by ANY test run — typically a dockerized
+  one: a job summary (counts, duration, failing cases with their messages, suites, every case), an
+  optional sticky PR comment and check run with failure annotations, the raw reports as an artifact, and
+  the counts as outputs. Generalized from ohanalabs-ai/ohana-github docker-compose-devsecops-test-workflow.yaml.
+  Run it with `if: always()` after the test step. Comments need `pull-requests: write`, check runs `checks: write`.
+inputs:
+  paths:
+    description: "Report files, globs or directories (newline/comma separated, relative to the workspace; `!` excludes). A directory means `<dir>/**/*.xml` (+ `*.tap` with format auto)."
+    required: true
+  format:
+    description: "auto | junit | tap — auto sniffs each file (XML → JUnit, `ok`/`not ok`/`TAP version` → TAP)"
+    required: false
+    default: auto
+  title:
+    description: "Heading of the summary / comment / check run; also keys the sticky comment, so give each report in a job its own"
+    required: false
+    default: "✅ Test results"
+  command:
+    description: "How the tests were run, shown verbatim (e.g. `docker compose -f docker-compose-tests.yaml run test`) — never put a secret here"
+    required: false
+    default: ""
+  comment:
+    description: "Post/refresh a sticky PR comment (pull_request events only; degrades to a warning without `pull-requests: write`)"
+    required: false
+    default: "true"
+  comment-key:
+    description: "Sticky-comment identity (default: a slug of `title`)"
+    required: false
+    default: ""
+  collapse:
+    description: "Fold the per-case table into <details> in the PR comment (the old workflow's collapse-pr-comments)"
+    required: false
+    default: "true"
+  check-run:
+    description: "Also create a check run (conclusion + up to 50 failure annotations) — needs `checks: write`"
+    required: false
+    default: "false"
+  check-name:
+    description: "Check-run name (default: `title`)"
+    required: false
+    default: ""
+  fail-on-failure:
+    description: "Fail this step when a report has failed/errored cases or cannot be parsed (default: report only — the test step's own exit code gates the job)"
+    required: false
+    default: "false"
+  fail-on-empty:
+    description: "Fail this step when no report file matched `paths` (default: warn)"
+    required: false
+    default: "false"
+  artifact-name:
+    description: "Upload the matched raw reports under this artifact name ('' = no upload). Must be unique per run (matrix: add the leg)."
+    required: false
+    default: test-results
+  artifact-retention-days:
+    description: "Artifact retention ('' = the repository default)"
+    required: false
+    default: ""
+  github-token:
+    description: "Token for the PR comment / check run"
+    required: false
+    default: ${{ github.token }}
+outputs:
+  total:
+    description: Test cases found
+    value: ${{ steps.report.outputs.total }}
+  passed:
+    description: Passed cases
+    value: ${{ steps.report.outputs.passed }}
+  failed:
+    description: Failed cases (assertion failures)
+    value: ${{ steps.report.outputs.failed }}
+  errors:
+    description: Errored cases (setup/runtime errors, TAP `Bail out!`)
+    value: ${{ steps.report.outputs.errors }}
+  skipped:
+    description: Skipped cases (incl. TAP TODO)
+    value: ${{ steps.report.outputs.skipped }}
+  duration:
+    description: Total duration in seconds
+    value: ${{ steps.report.outputs.duration }}
+  conclusion:
+    description: "success | failure (failed/errored cases or an unreadable report) | neutral (no test cases)"
+    value: ${{ steps.report.outputs.conclusion }}
+  files:
+    description: Number of report files matched
+    value: ${{ steps.report.outputs.files }}
+  markdown-file:
+    description: Path of the rendered markdown report (under $RUNNER_TEMP) — reuse it in a later step
+    value: ${{ steps.report.outputs.markdown-file }}
+runs:
+  using: composite
+  steps:
+    # Every run publishes what it did, on every outcome (owner rule 2026-10-13) — report.ts writes the
+    # job summary in a `finally`, including "no report matched" and unreadable files.
+    - name: ✅ parse + publish test reports
+      id: report
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        HELPERS: ${{ github.action_path }}
+        PATHS: ${{ inputs.paths }}
+        FORMAT: ${{ inputs.format }}
+        TITLE: ${{ inputs.title }}
+        COMMAND: ${{ inputs.command }}
+        COMMENT: ${{ inputs.comment }}
+        COMMENT_KEY: ${{ inputs.comment-key }}
+        COLLAPSE: ${{ inputs.collapse }}
+        CHECK_RUN: ${{ inputs.check-run }}
+        CHECK_NAME: ${{ inputs.check-name }}
+        FAIL_ON_FAILURE: ${{ inputs.fail-on-failure }}
+        FAIL_ON_EMPTY: ${{ inputs.fail-on-empty }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const { default: run } = await import(`${process.env.HELPERS}/report.ts`);
+          await run({ core, github, context, glob, exec });
+
+    - name: 📦 upload raw test reports
+      if: always() && inputs.artifact-name != '' && steps.report.outputs.files != '' && steps.report.outputs.files != '0'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.report.outputs.file-list }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn

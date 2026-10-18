@@ -1,0 +1,17 @@
+TAP version 13
+# Subtest: parses a report
+ok 1 - parses a report
+  ---
+  duration_ms: 1.5
+  ...
+# Subtest: renders a table
+not ok 2 - renders a table
+  ---
+  duration_ms: 12.25
+  failureType: 'testCodeFailure'
+  error: 'Expected values to be strictly equal'
+  message: 'Expected values to be strictly equal'
+  ...
+ok 3 - talks to GitHub # SKIP no token in CI
+not ok 4 - streams large files # TODO not implemented
+1..4

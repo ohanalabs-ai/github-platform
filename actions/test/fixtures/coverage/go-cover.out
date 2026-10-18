@@ -1,0 +1,7 @@
+mode: atomic
+github.com/planeodev/demo/internal/api/handler.go:10.40,12.2 2 5
+github.com/planeodev/demo/internal/api/handler.go:14.40,16.16 2 0
+github.com/planeodev/demo/internal/api/handler.go:16.16,18.3 1 0
+github.com/planeodev/demo/internal/store/store.go:5.30,8.2 3 1
+github.com/planeodev/demo/internal/store/store.go:10.30,11.2 1 0
+github.com/planeodev/demo/internal/api/handler.go:14.40,16.16 2 3
