@@ -191,8 +191,13 @@ env:
   # Derived: GitHub-native attestations are produced (and pushed) only in github mode.
   PUSH_ATTESTATIONS: ${{ (inputs.attestation-mode == 'github' || (inputs.attestation-mode != 'cosign' && inputs.attestation-mode != 'none' && (inputs.push-attestations == 'true' || github.event.repository.visibility != 'private'))) && 'true' || 'false' }}
 
+# One group per IMAGE, not per caller workflow: in a called workflow the group resolves the same for every
+# caller on a ref, and GitHub keeps one running + one pending run per group and CANCELS older pending runs. A
+# repo that publishes several images from one compose file (one caller per image, e.g. planeodev/claude-agents
+# planeo-samples: nine sample workflows on one push to main) had 6 of 9 builds cancelled at 0s. The image
+# suffix and target service make the group per image; repeated builds of the SAME image still serialize.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.image-name-suffix }}-${{ inputs.docker-compose-target-service }}
   cancel-in-progress: false
 
 jobs:
