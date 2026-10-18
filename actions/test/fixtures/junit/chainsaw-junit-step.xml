@@ -1,0 +1,20 @@
+<testsuites name="chainsaw-report" time="10.189542" tests="6" failures="1">
+  <testsuite name="configmap-roundtrip" tests="3" failures="0" errors="0" id="0" package="/tests/pass-cm" time="0.133585" timestamp="2026-10-18T06:38:15Z">
+    <properties>
+      <property name="namespace" value=""></property>
+    </properties>
+    <testcase name="create" classname="" time="0.116445"></testcase>
+    <testcase name="cleanup (create)" classname="" time="0.003639"></testcase>
+    <testcase name="@cleanup" classname="" time="5.104559"></testcase>
+  </testsuite>
+  <testsuite name="configmap-wrong-value" tests="3" failures="1" errors="0" id="0" package="/tests/fail-cm" time="5.077382" timestamp="2026-10-18T06:38:15Z">
+    <properties>
+      <property name="namespace" value=""></property>
+    </properties>
+    <testcase name="assert-mismatch" classname="" time="5.059889">
+      <failure message="------------------------------------------&#xA;v1/ConfigMap/chainsaw-composed-earwig/demo&#xA;------------------------------------------&#xA;* data.key: Invalid value: &#34;value&#34;: Expected value: &#34;other&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -1,6 +1,6 @@&#xA; apiVersion: v1&#xA; data:&#xA;-  key: other&#xA;+  key: value&#xA; kind: ConfigMap&#xA; metadata:&#xA;   name: demo&#xA;"></failure>
+    </testcase>
+    <testcase name="cleanup (assert-mismatch)" classname="" time="0.005934"></testcase>
+    <testcase name="@cleanup" classname="" time="5.105221"></testcase>
+  </testsuite>
+</testsuites>

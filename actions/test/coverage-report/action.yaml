@@ -1,0 +1,140 @@
+name: ☂️ test/coverage-report
+description: >-
+  Publish code coverage from Cobertura XML, JaCoCo XML, LCOV or Go coverprofiles written by ANY test run —
+  typically a dockerized one: a job summary with the irongut/CodeCoverageSummary-style badge and
+  per-package Line / Branch / Complexity / Health table ("<low> <high>" thresholds), an optional sticky PR
+  comment and check run, the raw reports as an artifact, and the rates as outputs. Generalized from
+  ohanalabs-ai/ohana-github docker-compose-devsecops-test-workflow.yaml. Run it with `if: always()` after
+  the test step. Comments need `pull-requests: write`, check runs `checks: write`.
+inputs:
+  paths:
+    description: "Coverage files, globs or directories (newline/comma separated, relative to the workspace; `!` excludes). A directory means `<dir>/**/*.{xml,info,lcov,out}` for format auto."
+    required: true
+  format:
+    description: "auto | cobertura | jacoco | lcov | go — auto sniffs each file"
+    required: false
+    default: auto
+  title:
+    description: "Heading of the summary / comment / check run; also keys the sticky comment"
+    required: false
+    default: "☂️ Code coverage"
+  command:
+    description: "How the coverage was collected, shown verbatim — never put a secret here"
+    required: false
+    default: ""
+  thresholds:
+    description: "\"<low> <high>\" percentages: ❌ below low, ➖ between, ✅ at/above high (irongut's `thresholds`)"
+    required: false
+    default: "70 85"
+  fail-below-min:
+    description: "Fail this step when the overall line rate is below the low threshold (irongut's `fail_below_min`)"
+    required: false
+    default: "false"
+  fail-on-empty:
+    description: "Fail this step when no coverage file matched `paths` (default: warn)"
+    required: false
+    default: "false"
+  badge:
+    description: "Render the shields.io coverage badge (an image URL carrying only the percentage)"
+    required: false
+    default: "true"
+  comment:
+    description: "Post/refresh a sticky PR comment (pull_request events only; degrades to a warning without `pull-requests: write`)"
+    required: false
+    default: "true"
+  comment-key:
+    description: "Sticky-comment identity (default: a slug of `title`)"
+    required: false
+    default: ""
+  collapse:
+    description: "Fold each report's table into <details> in the PR comment"
+    required: false
+    default: "true"
+  check-run:
+    description: "Also create a check run (failure when below the low threshold) — needs `checks: write`"
+    required: false
+    default: "false"
+  check-name:
+    description: "Check-run name (default: `title`)"
+    required: false
+    default: ""
+  artifact-name:
+    description: "Upload the matched raw coverage files under this artifact name ('' = no upload). Unique per run."
+    required: false
+    default: coverage-results
+  artifact-retention-days:
+    description: "Artifact retention ('' = the repository default)"
+    required: false
+    default: ""
+  github-token:
+    description: "Token for the PR comment / check run"
+    required: false
+    default: ${{ github.token }}
+outputs:
+  line-rate:
+    description: "Overall line (Go: statement) coverage percentage, two decimals ('' when no report)"
+    value: ${{ steps.report.outputs.line-rate }}
+  branch-rate:
+    description: "Overall branch coverage percentage ('' when the reports carry no branch data)"
+    value: ${{ steps.report.outputs.branch-rate }}
+  lines-covered:
+    value: ${{ steps.report.outputs.lines-covered }}
+    description: Covered lines (statements for Go)
+  lines-valid:
+    value: ${{ steps.report.outputs.lines-valid }}
+    description: Coverable lines (statements for Go)
+  branches-covered:
+    value: ${{ steps.report.outputs.branches-covered }}
+    description: Covered branches
+  branches-valid:
+    value: ${{ steps.report.outputs.branches-valid }}
+    description: Coverable branches
+  health:
+    description: "healthy (≥ high) | warning (≥ low) | unhealthy (< low) | unknown"
+    value: ${{ steps.report.outputs.health }}
+  below-min:
+    description: "true when the overall line rate is below the low threshold"
+    value: ${{ steps.report.outputs.below-min }}
+  files:
+    description: Number of coverage files matched
+    value: ${{ steps.report.outputs.files }}
+  markdown-file:
+    description: Path of the rendered markdown report (under $RUNNER_TEMP)
+    value: ${{ steps.report.outputs.markdown-file }}
+runs:
+  using: composite
+  steps:
+    # Every run publishes what it did, on every outcome (owner rule 2026-10-13) — report.ts writes the
+    # job summary in a `finally`, including "no report matched" and unreadable files.
+    - name: ☂️ parse + publish coverage reports
+      id: report
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        HELPERS: ${{ github.action_path }}
+        PATHS: ${{ inputs.paths }}
+        FORMAT: ${{ inputs.format }}
+        TITLE: ${{ inputs.title }}
+        COMMAND: ${{ inputs.command }}
+        THRESHOLDS: ${{ inputs.thresholds }}
+        FAIL_BELOW_MIN: ${{ inputs.fail-below-min }}
+        FAIL_ON_EMPTY: ${{ inputs.fail-on-empty }}
+        BADGE: ${{ inputs.badge }}
+        COMMENT: ${{ inputs.comment }}
+        COMMENT_KEY: ${{ inputs.comment-key }}
+        COLLAPSE: ${{ inputs.collapse }}
+        CHECK_RUN: ${{ inputs.check-run }}
+        CHECK_NAME: ${{ inputs.check-name }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const { default: run } = await import(`${process.env.HELPERS}/report.ts`);
+          await run({ core, github, context, glob, exec });
+
+    - name: 📦 upload raw coverage reports
+      if: always() && inputs.artifact-name != '' && steps.report.outputs.files != '' && steps.report.outputs.files != '0'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.report.outputs.file-list }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn

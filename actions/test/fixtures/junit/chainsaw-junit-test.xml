@@ -1,0 +1,10 @@
+<testsuites name="chainsaw-report" time="10.294714" tests="2" failures="1">
+  <testsuite name="/tests/pass-cm" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="configmap-roundtrip" classname="" time="0.138295"></testcase>
+  </testsuite>
+  <testsuite name="/tests/fail-cm" tests="1" failures="1" errors="0" id="0" time="">
+    <testcase name="configmap-wrong-value" classname="" time="5.084053">
+      <failure message="------------------------------------------&#xA;v1/ConfigMap/chainsaw-devoted-panther/demo&#xA;------------------------------------------&#xA;* data.key: Invalid value: &#34;value&#34;: Expected value: &#34;other&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -1,6 +1,6 @@&#xA; apiVersion: v1&#xA; data:&#xA;-  key: other&#xA;+  key: value&#xA; kind: ConfigMap&#xA; metadata:&#xA;   name: demo&#xA;"></failure>
+    </testcase>
+  </testsuite>
+</testsuites>
