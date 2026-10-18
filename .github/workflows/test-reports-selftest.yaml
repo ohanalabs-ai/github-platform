@@ -4,8 +4,8 @@
 # (`uses: ./actions/test/...`), against the committed fixtures — real Kyverno Chainsaw v0.2.15
 # JUNIT-TEST / JUNIT-STEP / JUNIT-OPERATION reports, pytest + surefire JUnit, TAP, and Cobertura /
 # JaCoCo / LCOV / Go coverage — then asserts their outputs, the fail-on-failure gate and the
-# no-match path. On a pull_request it also leaves the two sticky comments + check runs, so the
-# reviewer sees exactly what a consumer gets. No docker, no cluster, no secrets.
+# no-match path. On a pull_request it also leaves the two sticky comments (+ the coverage check
+# run), so the reviewer sees exactly what a consumer gets. No docker, no cluster, no secrets.
 name: 🧪 test-reports-selftest
 run-name: "🧪 test-report composites self-test — ${{ github.event.pull_request.title || github.ref_name }}"
 
@@ -52,7 +52,10 @@ jobs:
           paths: actions/test/fixtures/junit/chainsaw-junit-*.xml
           title: "🧪 selftest · Chainsaw JUnit"
           command: chainsaw test tests/chainsaw --report-format JUNIT-TEST --report-path reports --report-name chainsaw
-          check-run: "true"
+          # no check-run here: the fixtures fail ON PURPOSE, and a red check on every PR touching
+          # actions/test reads like a broken build (the annotated failure check run was verified on
+          # https://github.com/ohanalabs-ai/github-platform/pull/59 — 3 annotations). The coverage step
+          # below exercises the check-run path with a passing conclusion.
           artifact-name: selftest-chainsaw-junit
           artifact-retention-days: "3"
 
