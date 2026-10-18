@@ -277,7 +277,8 @@ export function renderCoverageMarkdown(reports: CoverageReport[], problems: stri
     const groups = r.groups.length > max ? r.groups.slice(0, max) : r.groups;
     let tbl = table(groups, r.totals, o.thresholds, showComplexity, showBranch);
     if (r.groups.length > max) tbl += `\n\n… ${r.groups.length - max} more packages (see the report artifact).`;
-    const head = `\`${cell(r.report)}\` (${r.format}) — ${percent(r.totals.lineRate)} ${HEALTH_ICON[health(r.totals.lineRate, o.thresholds)]}`;
+    // <code>, not backticks: Markdown is NOT rendered inside <summary> (collapse: true), so `x` showed literally.
+    const head = `<code>${cell(r.report)}</code> (${r.format}) — ${percent(r.totals.lineRate)} ${HEALTH_ICON[health(r.totals.lineRate, o.thresholds)]}`;
     md.push(o.collapse ? details(head, tbl) : `### ${head}\n\n${tbl}`, "");
   }
   if (reports.length > 1) {

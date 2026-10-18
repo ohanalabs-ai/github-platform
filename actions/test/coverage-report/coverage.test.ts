@@ -109,3 +109,14 @@ test("outputs: rates as percentages, health, below-min", () => {
   assert.equal(coverageOutputs(r.totals, { low: 90, high: 95 }, [], true)["below-min"], "true");
   assert.equal(coverageOutputs(r.totals, T, [], false).health, "unknown");
 });
+
+test("markdown: the per-report heading uses <code>, never backticks (Markdown is not rendered inside <summary>)", () => {
+  const reports = [parseGoCover(fixture("go-cover.out"), "actions/test/fixtures/coverage/go-cover.out")];
+  for (const collapse of [true, false]) {
+    const md = renderCoverageMarkdown(reports, [], { title: "C", thresholds: T, badge: false, collapse });
+    assert.match(md, /<code>actions\/test\/fixtures\/coverage\/go-cover\.out<\/code> \(go\) — 77\.78% ➖/);
+    assert.doesNotMatch(md, /`actions\/test\/fixtures/);
+  }
+  const collapsed = renderCoverageMarkdown(reports, [], { title: "C", thresholds: T, badge: false, collapse: true });
+  assert.match(collapsed, /<summary><code>actions\/test\/fixtures\/coverage\/go-cover\.out<\/code> \(go\) — 77\.78% ➖<\/summary>/);
+});
