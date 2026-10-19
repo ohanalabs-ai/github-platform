@@ -50,6 +50,7 @@ jobs:
         uses: ./actions/test/junit-report
         with:
           paths: actions/test/fixtures/junit/chainsaw-junit-*.xml
+          fail-on-failure: "false" # the fixtures fail ON PURPOSE (rendering demo); the gate step below proves the default
           title: "🧪 selftest · Chainsaw JUnit"
           command: chainsaw test tests/chainsaw --report-format JUNIT-TEST --report-path reports --report-name chainsaw
           # no check-run here: the fixtures fail ON PURPOSE, and a red check on every PR touching
@@ -69,9 +70,10 @@ jobs:
             actions/test/fixtures/tap/
           title: "🧪 selftest · pytest + surefire + TAP"
           comment: "false"
+          fail-on-failure: "false" # failing fixtures on purpose
           artifact-name: ""
 
-      - name: ❌ fail-on-failure gates a failing report
+      - name: ❌ a failing report fails the step BY DEFAULT (no fail-on-failure input)
         id: gate
         continue-on-error: true
         uses: ./actions/test/junit-report
@@ -79,7 +81,6 @@ jobs:
           paths: actions/test/fixtures/junit/chainsaw-junit-test.xml
           title: "🧪 selftest · gate"
           comment: "false"
-          fail-on-failure: "true"
           artifact-name: ""
 
       - name: ⚪ no report matched — warns, does not fail

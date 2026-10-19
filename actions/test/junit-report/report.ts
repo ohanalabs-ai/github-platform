@@ -4,7 +4,9 @@
 //   • a sticky PR comment (pull_request events, `comment: true`) sized to GitHub's 65 536-char limit
 //   • a check run with failure annotations (`check-run: true`)
 //   • step outputs (counts, duration, conclusion, the matched files for the artifact upload)
-// It fails the step only when asked (`fail-on-failure`, `fail-on-empty`). Never reads or prints secrets.
+// It FAILS the step on failed/errored cases or an unreadable report unless `fail-on-failure: "false"`
+// (owner rule 2026-10-18: a failing test must break the job), and on no matching report only with
+// `fail-on-empty`. Never reads or prints secrets.
 //
 // env: PATHS, FORMAT, TITLE, COMMAND, COMMENT, COMMENT_KEY, COLLAPSE, CHECK_RUN, CHECK_NAME,
 //      FAIL_ON_FAILURE, FAIL_ON_EMPTY, MAX_FAILURES
@@ -92,7 +94,7 @@ export default async function run(ctx: Ctx): Promise<void> {
     if (!files.length) {
       const msg = `no test reports matched: ${entries.join(", ")}`;
       if (boolInput(env.FAIL_ON_EMPTY, false)) core.setFailed(msg); else core.warning(msg);
-    } else if (report.conclusion === "failure" && boolInput(env.FAIL_ON_FAILURE, false)) {
+    } else if (report.conclusion === "failure" && boolInput(env.FAIL_ON_FAILURE, true)) {
       core.setFailed(`${title}: ${verdict(report)}`);
     }
   } catch (e) {
