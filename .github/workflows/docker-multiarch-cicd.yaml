@@ -196,8 +196,11 @@ env:
 # repo that publishes several images from one compose file (one caller per image, e.g. planeodev/claude-agents
 # planeo-samples: nine sample workflows on one push to main) had 6 of 9 builds cancelled at 0s. The image
 # suffix and target service make the group per image; repeated builds of the SAME image still serialize.
+# Also per EVENT (+ PR number): a MERGED PR's `closed` run (pr-delete) carries github.ref = the BASE branch, so
+# keyed on github.ref alone it shared the branch push build's group — it queued behind (or, with a third run,
+# displaced) the release build (2026-10-26, planeodev/claude-agents; the callers' own groups had the same bug).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.image-name-suffix }}-${{ inputs.docker-compose-target-service }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.image-name-suffix }}-${{ inputs.docker-compose-target-service }}
   cancel-in-progress: false
 
 jobs:

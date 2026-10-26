@@ -105,6 +105,23 @@ goes red there (shift-left). An empty `image_ref` (closed PR) is handled by the 
 2. Registry credentials available to the caller — either the default `GITHUB_TOKEN` for `ghcr.io` (already permitted via `secrets: inherit`), or explicit Docker Hub credentials if mirroring there.
 3. For SLSA attestation: the repo's Actions permissions must allow `id-token: write` and `attestations: write` (set in the caller's `permissions:` block, not this reusable workflow's own — a caller must grant them explicitly per GitHub's reusable-workflow permission model).
 
+## Caller concurrency — never let the PR cleanup cancel the release build
+
+A caller that triggers on `pull_request: [opened, synchronize, reopened, closed]` (closed → `pr-delete`) and `push`
+must NOT group on `github.ref` alone: for a **merged** PR's `closed` run GitHub sets `github.ref` to the base
+branch (`refs/heads/main`), so the cleanup lands in the main push build's group and, with `cancel-in-progress:
+true`, cancels the release build seconds in (planeodev/claude-agents 2026-10-26: 8 of 9 `main-<sha7>` images
+never published). Use:
+
+```yaml
+concurrency:
+  group: <workflow-name>-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+```
+
+PR builds still supersede each other per PR; push/dispatch (release) builds are never cancelled. The reusable's
+own group (`docker-multiarch-cicd.yaml`) is per event + PR number + image for the same reason.
+
 ## Planeo deploy stamp (scan + attest) — ONE job after any build
 
 Owner rule (2026-10-13): **scan + attestation is what every repository adds to meet the security
