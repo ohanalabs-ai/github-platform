@@ -1,0 +1,59 @@
+name: 🩺 github/tracking-issue
+description: >-
+  ONE issue per scheduled check: a failing run opens it (or comments on the open one), the next green run comments
+  and closes it, a cancelled/skipped run does nothing. Deduplicated by a hidden marker keyed on `key`, so the title can
+  change. Use it in a final `if: always()` job/step of a nightly or scheduled workflow, passing the result of the job
+  it tracks (`needs.<job>.result`). Needs `issues: write`. Writes a job summary on every outcome.
+inputs:
+  key:
+    description: "Stable identity of the check (e.g. `kagent-nightly`) — one open issue per key"
+    required: true
+  title:
+    description: "Issue title used when a new issue is opened"
+    required: true
+  outcome:
+    description: "success | failure | cancelled | skipped — usually `needs.<job>.result`"
+    required: true
+  body:
+    description: "Markdown for the issue / failure comment (what failed, where to look) — never a secret"
+    required: false
+    default: ""
+  label:
+    description: "Label the issue carries (created if missing)"
+    required: false
+    default: tracking
+  close-on-success:
+    description: "Close the open issue on a green run (false = only comment)"
+    required: false
+    default: "true"
+  github-token:
+    description: Token with `issues: write`
+    required: false
+    default: ${{ github.token }}
+outputs:
+  action:
+    description: "create | comment | close | none"
+    value: ${{ steps.issue.outputs.action }}
+  issue-url:
+    description: The tracking issue's URL ('' when none exists)
+    value: ${{ steps.issue.outputs.issue-url }}
+runs:
+  using: composite
+  steps:
+    - name: 🩺 open / update / close the tracking issue
+      id: issue
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        HELPERS: ${{ github.action_path }}
+        KEY: ${{ inputs.key }}
+        TITLE: ${{ inputs.title }}
+        OUTCOME: ${{ inputs.outcome }}
+        BODY: ${{ inputs.body }}
+        LABEL: ${{ inputs.label }}
+        CLOSE_ON_SUCCESS: ${{ inputs.close-on-success }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const { default: run } = await import(`${process.env.HELPERS}/issue.ts`);
+          await run({ core, github, context });
