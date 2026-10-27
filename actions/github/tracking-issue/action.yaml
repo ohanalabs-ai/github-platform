@@ -27,7 +27,7 @@ inputs:
     required: false
     default: "true"
   github-token:
-    description: Token with `issues: write`
+    description: "Token with `issues: write`"
     required: false
     default: ${{ github.token }}
 outputs:
