@@ -1,0 +1,53 @@
+# 🤖 agent-verdict — the machine-readable decision of a 🚦 gitops gate (contract planeo.dev/gitops-gate/v1):
+# gate.json + a "🤖 Agent decision" summary section, from every group's group.json and the caller's toJson(needs).
+# Logic: agent-verdict.ts (TypeScript via actions/github-script — no npm deps). See README.md.
+name: gitops-agent-verdict
+description: "Map every GitOps unit to one decision and the gate to one verdict, written to gate.json for agents"
+inputs:
+  groups-dir:
+    description: "Directory holding the downloaded gitops-group-* artifacts (group*.json)"
+    required: true
+  results-json:
+    description: "The caller's toJson(needs) (every group job's result)"
+    required: true
+  title:
+    description: "Gate scope (Platform, Demos, Rekorda, …)"
+    required: false
+    default: GitOps
+  mode:
+    description: "diff | refresh"
+    required: false
+    default: diff
+  output:
+    description: "Path of the gate.json to write"
+    required: false
+    default: gate.json
+  agent-markdown:
+    description: "Optional path for the collapsed markdown block (appended to the sticky comment)"
+    required: false
+    default: agent.md
+outputs:
+  verdict:
+    description: "pass | no-change | blocked | failed"
+    value: ${{ steps.verdict.outputs.verdict }}
+  gate-json:
+    description: "Path of gate.json"
+    value: ${{ steps.verdict.outputs.gate-json }}
+runs:
+  using: composite
+  steps:
+    - name: 🤖 agent verdict (gitops-gate/v1)
+      id: verdict
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        ACTION_DIR: ${{ github.action_path }}
+        GROUPS_DIR: ${{ inputs.groups-dir }}
+        RESULTS: ${{ inputs.results-json }}
+        TITLE: ${{ inputs.title }}
+        MODE: ${{ inputs.mode }}
+        OUT: ${{ inputs.output }}
+        AGENT_MD: ${{ inputs.agent-markdown }}
+      with:
+        script: |
+          const { default: run } = await import(`${process.env.ACTION_DIR}/agent-verdict.ts`);
+          await run({ core, context });

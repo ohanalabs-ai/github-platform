@@ -8,7 +8,7 @@ Two reusable workflows plus the composite actions they are built from:
 |---|---|
 | [`.github/workflows/gitops-argocd-group.yaml`](../../.github/workflows/gitops-argocd-group.yaml) | ONE group of Applications on ONE cluster: `🧭 discover` → `🧩 render <app>` → `🔍 diff <app>` (mode=diff) / `♻️ refresh <app>` (mode=refresh) → `📋 result` (sticky comment, group.json, Deployment) |
 | [`.github/workflows/gitops-argocd-gate.yaml`](../../.github/workflows/gitops-argocd-gate.yaml) | the gate over a caller's group jobs: results table + consolidated summary (table, one Mermaid, "Merging this PR will …"), one sticky comment per scope, fails if any group failed |
-| [`actions/gitops/*`](../../actions/gitops/) | `toolchain` · `discover-units` · `render-diff` · `kustomize-tree` · `argocd-diff` · `argocd-refresh` · `group-report` · `gate-summary` — each `action.yaml` + the script it runs + a README; runnable by hand (see *Local run*) |
+| [`actions/gitops/*`](../../actions/gitops/) | `toolchain` · `discover-units` · `render-diff` · `kustomize-tree` · `argocd-diff` · `argocd-refresh` · `group-report` · `gate-summary` · `agent-verdict` — each `action.yaml` + the script it runs + a README; runnable by hand (see *Local run*) |
 
 It replaced two copies of the same flow — `planeodev/planeo-infra`'s `_gitops-group.yml`/`_gitops-group-gate.yaml` (+ `clusters/{render-diff,kustomize-tree,gitops-group-report,gitops-gate-summary}.sh`) and `planeodev/customers`' `gitops-pr-diff.yml`/`gitops-sync.yml` (+ `scripts/gitops/*.sh`) — with thin callers. Every behaviour and verdict both had is preserved; two capabilities were added here only: the [`noop-live-equal`](capabilities/verdicts.md#noop-live-equal) verdict and the [multi-source `helm template` render](capabilities/multi-source-helm-template.md).
 
@@ -17,6 +17,7 @@ It replaced two copies of the same flow — `planeodev/planeo-infra`'s `_gitops-
 - [`unit-contract`](capabilities/unit-contract.md) — the JSON a repo's discovery command prints; the only repo-specific piece.
 - [`verdicts`](capabilities/verdicts.md) — every live verdict, its emoji, whether it passes, and the no-op policy + escape hatch.
 - [`multi-source-helm-template`](capabilities/multi-source-helm-template.md) — how an Application with `spec.sources[]` (OCI/HTTP chart + `$values` + git path) gets a real rendered diff.
+- [`agent-verdict`](capabilities/agent-verdict.md) — `gate.json` (`planeo.dev/gitops-gate/v1`): one decision per unit and one gate verdict for **agents** (the Principal Engineer, the DevSecOps specialist) — read it before deciding; a `not_verified` entry means the live diff did not run.
 - [`prerequisites`](capabilities/prerequisites.md) — Vault (GitHub OIDC), tailnet, AWS, repo variables/secrets, the GitHub Environments and the required-status names.
 
 ## How it reads
@@ -156,6 +157,15 @@ Always `@main` for callers (org-owned repo; callers track the latest reviewed ve
 ## Job names and required statuses
 
 A caller job that `uses:` a reusable workflow produces no check of its own — only the nested jobs do (`🧱 core / 🧭 discover`, `🧱 core / 🧩 render cert-manager`, `🧱 core / 🧪 kustomize check`, `🧱 core / 🔍 diff cert-manager`, `🧱 core / 📋 result`), and those vary per PR. Require the **gate**: `<caller gate job name> / 🚦 gate`. Name every caller's gate job distinctly (`🚦 platform gate`, `🚦 demos gate`, `🚦 vault gate`, `🚦 customers gate`): GitHub keys a status by its name, so several workflows all reporting `🚦 gate` would overwrite each other and a passing scope could mask a failing one. Migrating a repo's single-workflow checks (e.g. a bare `📋 result`) to these callers **renames its required statuses** — update branch protection in the same change.
+
+## For agents: `gate.json`
+
+Every `🚦 gate` uploads **`gitops-gate-<title>`** (`gate.json`, contract `planeo.dev/gitops-gate/v1`), exposes the
+`workflow_call` output **`verdict`** (`pass` · `no-change` · `blocked` · `failed`) and adds a `🤖 Agent decision`
+section to its job summary and (collapsed) to its sticky comment. An agent working on a GitOps PR reads that — not
+the comments, not the logs — and acts on `next_actions`; it never reports a `not_verified` unit as live-verified and
+never merges (`pass` = ready for human review). Read it with
+`gh run download <run-id> -R <repo> -n gitops-gate-<title>`. Mapping and rules: [capabilities/agent-verdict.md](capabilities/agent-verdict.md).
 
 ## Toolchain: `tools-image` vs pinned releases
 

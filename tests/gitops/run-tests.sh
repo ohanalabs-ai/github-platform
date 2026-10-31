@@ -16,7 +16,7 @@
 #                           diff · noop · noop-allowed · noop-expected · noop-prune-nothing ·
 #                           noop-live-equal · meta · new · error — and the 3× cache-miss retry
 #                           (which must call `argocd app get … --refresh -o json`, never `-o name`)
-#   report                  group-report cells (📝 live already equal …) and the gate summary
+#   report                  group-report cells (📝 live already equal …), the gate summary and the 🤖 agent verdict (gate.json)
 #   discover                the placeholder matrix row for 0 units
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; root="$(cd "$here/../.." && pwd)"
@@ -223,6 +223,18 @@ check "cell: ❌ live no-op (blocked)" "grep -q '❌ live no-op (blocked)' $R/ou
 mkdir -p "$R/groups2"; cp "$R/out2/group.json" "$R/groups2/group-cl-grp2.json"
 bash "$A/gate-summary/gitops-gate-summary.sh" "$R/groups2" "$R/gate2.md" diff >/dev/null; rc=$?
 check "gate exit 1 on a blocking noop" "[ $rc -eq 1 ]"
+# 🤖 agent-verdict on the REAL group-report output (gitops-gate/v1) — the same group.json the gate downloads.
+# Needs a Node that strips TypeScript (≥ 22.6 with the flag, native from 23.6); the runner's default Node may be
+# older — then SKIP here (the unit tests run on github-script's Node 24 in actions-typescript-selftest.yaml).
+NODE_TS=""; node -e 'process.exit(0)' --experimental-strip-types 2>/dev/null && NODE_TS="--experimental-strip-types"
+if node $NODE_TS --no-warnings --input-type=module -e "await import('$A/agent-verdict/agent-verdict.ts')" 2>/dev/null; then
+  verdict() { node $NODE_TS --no-warnings --input-type=module -e "const m = await import('$A/agent-verdict/agent-verdict.ts'); const g = m.buildGate(m.readGroups('$1'), JSON.parse(process.argv[1]), {title:'t',mode:'diff',repository:'o/r',pr:1,sha:'s',run_url:'https://run'}); console.log(g.verdict + ' ' + g.units.map(u => u.app + ':' + u.decision).join(','));" "$2"; }
+  check "agent verdict: pass, d render-only (not live-verified)" "[ \"\$(verdict $R/groups '{\"g\":{\"result\":\"success\"}}')\" = 'pass a:merge-ok,b:merge-ok,c:merge-ok,d:merge-ok-render-only' ]"
+  check "agent verdict: blocked on a blocking noop" "[ \"\$(verdict $R/groups2 '{\"g\":{\"result\":\"success\"}}')\" = 'blocked e:blocked-noop' ]"
+  check "agent verdict: failed when a group failed" "verdict $R/groups2 '{\"g\":{\"result\":\"failure\"}}' | grep -q '^failed '"
+else
+  echo "  skip agent verdict: node $(node --version) cannot import TypeScript (covered by actions-typescript-selftest)"
+fi
 
 echo "== discover"
 D="$W/discover"; mkdir -p "$D"; : > "$D/out"
