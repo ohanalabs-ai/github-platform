@@ -5,6 +5,10 @@
 # actions/gitops/gate-summary), posted as ONE sticky PR comment per caller (header
 # gitops-gate-<title>). Fails if any group failed or was cancelled.
 #
+# 🤖 For agents: actions/gitops/agent-verdict writes gate.json (contract planeo.dev/gitops-gate/v1 — one decision per
+# unit, one verdict, not_verified, next_actions), uploaded as the artifact gitops-gate-<title> and exposed as the
+# workflow_call output `verdict`; the job summary carries a "🤖 Agent decision" section. Agents decide from it.
+#
 # Required statuses are the CALLER job names nested with this job's name:
 #   "🚦 platform gate / 🚦 gate", "🚦 demos gate / 🚦 gate", "🚦 vault gate / 🚦 gate", …
 # The caller jobs MUST be named distinctly: if every caller used the same "🚦 gate", GitHub
@@ -37,12 +41,18 @@ on:
         type: string
         required: false
         default: diff
+    outputs:
+      verdict:
+        description: "gitops-gate/v1 verdict for agents: pass | no-change | blocked | failed (full decision: the gitops-gate-<title> artifact, gate.json)"
+        value: ${{ jobs.gate.outputs.verdict }}
 
 jobs:
   gate:
     name: 🚦 gate
     if: always()
     runs-on: ubuntu-latest
+    outputs:
+      verdict: ${{ steps.agent.outputs.verdict }}
     steps:
       - name: 📥 devsecops-gitops actions (this workflow's commit)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -67,6 +77,26 @@ jobs:
           output: consolidated.md
           mode: ${{ inputs.mode }}
 
+      # 🤖 the machine-readable decision (gate.json) + the "🤖 Agent decision" summary section — agents read this
+      - name: 🤖 agent verdict (gitops-gate/v1)
+        id: agent
+        continue-on-error: true # informational for agents — the gate's pass/fail stays the group results below
+        uses: ./.gitops-platform/actions/gitops/agent-verdict
+        with:
+          groups-dir: groups
+          results-json: ${{ inputs.results-json }}
+          title: ${{ inputs.title }}
+          mode: ${{ inputs.mode }}
+          output: gate.json
+          agent-markdown: agent.md
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.agent.outcome == 'success'
+        with:
+          name: gitops-gate-${{ inputs.title }}
+          path: gate.json
+          retention-days: 30
+
       - name: 📋 Aggregate the groups
         id: agg
         env:
@@ -80,6 +110,8 @@ jobs:
             echo "$RESULTS" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
             echo
             cat consolidated.md
+            echo
+            [ -f agent.md ] && cat agent.md
           } > gate.md
           cat gate.md >> "$GITHUB_STEP_SUMMARY"
           if echo "$RESULTS" | jq -e '[.[] | .result] | any(. == "failure" or . == "cancelled")' >/dev/null; then
