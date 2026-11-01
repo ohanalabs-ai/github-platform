@@ -24,7 +24,7 @@ of the ArgoCD diff and the 🚦 gate).
 | Finding | Level |
 |---|---|
 | `kustomize build` fails, kubeconform invalid, removed apiVersion | ❌ error |
-| image manifest not found (`404 MANIFEST_UNKNOWN`/`NAME_UNKNOWN`) | ❌ error |
+| image manifest not found (`404 MANIFEST_UNKNOWN`/`NAME_UNKNOWN`; on ghcr.io only when the repository is visible to the token) | ❌ error |
 | image lacks a `REQUIRED_PLATFORMS` entry (default `linux/amd64`) | ❌ error |
 | image the profile cannot see (401/403/429/network) | ⚠️ warning (`FAIL_ON_UNVERIFIABLE=true` → error) |
 | floating tag (`:latest`, `:main`, any letters-only tag) | ⚠️ warning (`FAIL_ON_FLOATING=true` → error) |
@@ -36,6 +36,17 @@ of the ArgoCD diff and the 🚦 gate).
 under-privileged) request for a private repository with 401/403, which is indistinguishable from a
 repository that does not exist. ghcr.io with the run's `GITHUB_TOKEN` (`packages: read`) sees public
 packages and private ones that granted the repository access in the package settings.
+
+**ghcr.io hides a private package behind the same 404.** A valid token WITHOUT access to another
+repository's private package gets `404 MANIFEST_UNKNOWN` — not DENIED — so on a ghcr.io 404 the check
+probes the repository itself (`GET /v2/<name>/tags/list`, same token): visible (200) → the tag/digest
+really is **missing** (error); not visible (404 `NAME_UNKNOWN` / 401 / 403 / network) → **unverifiable**
+with the hint "private package — grant the calling repository read access in the package's *Manage
+Actions access* settings". Seen live on ohanalabs-ai/k8s-infra PR 22 (2026-11-01): an existing
+`ghcr.io/ohanalabs-ai/vionix-engram/memories:main-a4f5fe6@sha256:cb9afa83…` failed the gate as "not found"
+(https://github.com/ohanalabs-ai/k8s-infra/actions/runs/41273116311). The caller still needs
+`permissions: packages: read`, and the package must grant the caller repository access, for the check to
+actually verify it.
 
 ## Auth profiles
 
