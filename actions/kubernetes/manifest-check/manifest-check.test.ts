@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { isFloatingTag, isPlaceholder, parseImageRef } from "./imageref.ts";
 import { removedApi } from "./deprecations.ts";
 import { extractImages } from "./objects.ts";
-import { checkImage, hasPlatform, parseChallenge, type Fetch } from "./registry.ts";
+import { checkImage, hasPlatform, parseChallenge, resolveGhcrNotFound, GHCR_PRIVATE_HINT, type Fetch } from "./registry.ts";
 import { imageFindings, renderReport, schemaFindings, type Policy } from "./findings.ts";
 import { credentials, findKustomizations, list } from "./check.ts";
 import { PINS, urlFor, VERSIONS } from "./install.ts";
@@ -106,6 +106,37 @@ test("checkImage: index platforms, single-image config, missing tag, private wit
   const authed = await checkImage(f, parseImageRef("reg.test/private:1.0"), { "reg.test": { username: "u", password: "p", profile: "github-token" } }, ["linux/amd64"]);
   assert.equal(authed.availability, "ok");
   assert.equal(authed.profile, "github-token");
+});
+
+// ghcr.io (2026-11-01, k8s-infra PR 22): a valid token WITHOUT access to another repo's private package gets
+// 404 MANIFEST_UNKNOWN on the manifest AND 404 NAME_UNKNOWN on tags/list; a visible repo answers tags/list 200.
+function fakeGhcr(): Fetch {
+  const res = (status: number, body: unknown) => ({ status, headers: { get: (_: string) => null }, text: async () => JSON.stringify(body) });
+  return async (url) => {
+    if (url.includes("/v2/o/visible/tags/list")) return res(200, { name: "o/visible", tags: ["main-aaaaaaa"] });
+    if (url.includes("/v2/o/hidden/tags/list")) return res(404, { errors: [{ code: "NAME_UNKNOWN", message: "repository name not known to registry" }] });
+    if (url.includes("/v2/o/visible/manifests/main-aaaaaaa")) return res(200, { manifests: [{ platform: { os: "linux", architecture: "amd64" } }] });
+    return res(404, { errors: [{ code: "MANIFEST_UNKNOWN", message: "manifest unknown" }] });
+  };
+}
+
+test("resolveGhcrNotFound: missing only when the repository is visible", () => {
+  assert.deepEqual(resolveGhcrNotFound(200), { availability: "missing", hint: "" });
+  for (const s of [404, 401, 403, 0]) {
+    assert.deepEqual(resolveGhcrNotFound(s), { availability: "unverifiable", hint: GHCR_PRIVATE_HINT });
+  }
+});
+
+test("checkImage (ghcr.io): a private package the token cannot see is unverifiable, a missing tag in a visible repo is missing", async () => {
+  const f = fakeGhcr();
+  const hidden = await checkImage(f, parseImageRef(`ghcr.io/o/hidden:main-a4f5fe6@${D}`), { "ghcr.io": { username: "x-access-token", password: "t", profile: "github-token" } }, ["linux/amd64"]);
+  assert.equal(hidden.availability, "unverifiable");
+  assert.match(hidden.detail, /MANIFEST_UNKNOWN/);
+  assert.match(hidden.detail, /Manage Actions access/);
+  const gone = await checkImage(f, parseImageRef("ghcr.io/o/visible:main-bbbbbbb"), { "ghcr.io": { username: "x-access-token", password: "t", profile: "github-token" } }, ["linux/amd64"]);
+  assert.equal(gone.availability, "missing");
+  const ok = await checkImage(f, parseImageRef("ghcr.io/o/visible:main-aaaaaaa"), {}, ["linux/amd64"]);
+  assert.equal(ok.availability, "ok");
 });
 
 test("checkImage: a network error is unverifiable, never missing", async () => {

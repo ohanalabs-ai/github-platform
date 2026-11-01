@@ -18,7 +18,7 @@
 # Live-column cells, one per verdict (products/devsecops-gitops/capabilities/verdicts.md):
 #   diff ✅ · noop ❌ blocked · noop-allowed ⚠️ · noop-expected 📝 · noop-prune-nothing 🧹 ·
 #   noop-live-equal 📝 live already equal · meta 📝 · new 🆕 · error/refresh-failed/validate-failed 💥 ·
-#   validated ✅ · render-only/build-only ℹ️ · external ⏭️ · skipped-no-argocd/skipped-no-tailnet ⏭️
+#   validated ✅ · render-only/build-only ℹ️ · external ⏭️ · skipped-no-argocd/skipped-no-tailnet ⏭️ · skipped-check-failed ⛔
 set -uo pipefail
 frags="${1:?frags dir}"; cluster="${2:?cluster}"; group="${3:?group}"; mode="${4:?mode}"; run_url="${5:?run url}"; units="${6:?units json}"; out="${7:?out dir}"
 mkdir -p "$out"
@@ -63,6 +63,7 @@ group_json='[]'
         meta) acell="📝 meta-only (docs)" ;;
         new) acell="🆕 not in ArgoCD yet (created after merge)" ;;
         error|refresh-failed|validate-failed) acell="💥 failed" ;; refreshed|validated) acell="✅ $as" ;;
+        skipped-check-failed) acell="⛔ not run (🧪 kustomize check failed)" ;;
         skipped-no-argocd) acell="⏭️ skipped (no ARGOCD_SERVER)" ;; skipped-no-tailnet) acell="⏭️ skipped (no Tailscale OAuth secrets)" ;;
         render-only) acell="ℹ️ render-only (multi-source)" ;; build-only) acell="ℹ️ build-only" ;; external) acell="⏭️ external" ;; —) acell="—" ;; *) acell="❓ $as" ;;
       esac

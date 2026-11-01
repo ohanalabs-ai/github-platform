@@ -17,6 +17,7 @@ The unit's own **rendered base→head diff** (`🧩 render`) is read next to the
 | `error` | 💥 failed | **no** | argocd exit > 1 after the retries (connection, RBAC, a reconcile that itself fails) |
 | `render-only` · `build-only` · `external` | ℹ️ render-only (multi-source) · ℹ️ build-only · ⏭️ external | yes | the live step does not apply: multi-source Application · a template excluded by an ApplicationSet generator · a path in another repository |
 | `skipped-no-argocd` · `skipped-no-tailnet` | ⏭️ skipped (no ARGOCD_SERVER) · ⏭️ skipped (no Tailscale OAuth secrets) | yes | not configured — the render still ran; never trust a green gate for the live half in that state |
+| `skipped-check-failed` | ⛔ not run (🧪 kustomize check failed) | yes (the check job failed) | the live diff step is skipped INSIDE the job (a job-level skip left the Checks UI with a raw `${{ … }} ${{ matrix.app }}` name); fix the check finding first |
 
 Post-merge (mode=refresh) statuses: `validated` ✅ (sync.revision == the merged SHA, Synced, Healthy, kubectl cross-check when configured), `new` 🆕, `refresh-failed` / `validate-failed` 💥.
 

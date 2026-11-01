@@ -109,6 +109,23 @@ function classify(status: number, body: string): Availability {
   return "unverifiable";
 }
 
+/** The hint on a ghcr.io package this run's token cannot see. */
+export const GHCR_PRIVATE_HINT =
+  "private package — grant the calling repository read access in the package's \"Manage Actions access\" settings, or the check cannot see it";
+
+/**
+ * ghcr.io answers 404 MANIFEST_UNKNOWN — not DENIED — when the token (a workflow's GITHUB_TOKEN with
+ * packages: read) is valid but has NO access to a private package owned by another repository
+ * (live 2026-11-01: ohanalabs-ai/k8s-infra PR 22, an existing vionix-engram image reported "missing").
+ * So a ghcr 404 is only "missing" once the REPOSITORY itself is visible: `repoStatus` is the status of
+ * GET /v2/<name>/tags/list with the same token. Visible (200) → the tag/digest really is missing;
+ * anything else (404 NAME_UNKNOWN, 401, 403, 0 = network) → the package is not visible → unverifiable.
+ */
+export function resolveGhcrNotFound(repoStatus: number): { availability: Availability; hint: string } {
+  if (repoStatus === 200) return { availability: "missing", hint: "" };
+  return { availability: "unverifiable", hint: GHCR_PRIVATE_HINT };
+}
+
 export async function checkImage(f: Fetch, ref: ImageRef, creds: Credentials, requiredPlatforms: string[]): Promise<ImageResult> {
   const cred = credentialFor(creds, ref.display);
   const s: Session = { f, ref, cred };
@@ -121,6 +138,13 @@ export async function checkImage(f: Fetch, ref: ImageRef, creds: Credentials, re
       const errs = (() => { try { return (JSON.parse(m.body) as { errors?: Array<{ code?: string; message?: string }> }).errors || []; } catch { return []; } })();
       r.detail = errs.map((e) => `${e.code || ""} ${e.message || ""}`.trim()).join("; ") || `HTTP ${m.status}`;
       if (m.status === 429) r.detail = `rate limited (HTTP 429)${r.detail ? ` — ${r.detail}` : ""}`;
+      if (r.availability === "missing" && ref.display === "ghcr.io") {
+        // ghcr hides a package the token cannot read behind the same 404 — probe the repository first
+        const probe = await get(s, "tags/list", "application/json").catch(() => ({ status: 0 }));
+        const v = resolveGhcrNotFound(probe.status);
+        r.availability = v.availability;
+        if (v.hint) r.detail = `${r.detail} — repository not visible to this token (tags/list HTTP ${probe.status}): ${v.hint}`;
+      }
       return r;
     }
     r.digest = m.headers.get("docker-content-digest") || ref.digest;
