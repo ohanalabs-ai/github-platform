@@ -19,6 +19,7 @@ export type Decision =
   | "merge-ok-render-only" // passes, but the live half did not run (listed in not_verified)
   | "review-new-app" // a new Application: the rendered diff is the whole change — a human reviews it
   | "fix-render" // the unit does not build
+  | "fix-check" // the 🧪 kustomize check failed, so the live diff did not run
   | "fix-live-error" // ArgoCD returned an error (or the post-merge validation failed)
   | "blocked-noop" // the PR changes nothing live and nothing explains it — explain it or close the PR
   | "needs-human"; // a status this contract does not know — never guess
@@ -40,7 +41,7 @@ export interface Gate {
   verdict: Verdict; groups: { name: string; result: string }[]; units: GateUnit[]; not_verified: string[]; next_actions: string[];
 }
 
-const BLOCKING: Decision[] = ["fix-render", "fix-live-error", "blocked-noop", "needs-human"];
+const BLOCKING: Decision[] = ["fix-render", "fix-check", "fix-live-error", "blocked-noop", "needs-human"];
 const PASS_LIVE = new Set(["diff", "noop-live-equal", "noop-expected", "noop-prune-nothing", "noop-allowed", "meta"]);
 const NOT_LIVE = new Set(["skipped-no-argocd", "skipped-no-tailnet", "render-only", "build-only", "external", "—", "", "?"]);
 const LIVE_ERROR = new Set(["error", "refresh-failed", "validate-failed"]);
@@ -50,6 +51,7 @@ export function decide(u: GroupUnit): { decision: Decision; reason: string } {
   const render = u.render ?? "?";
   const act = u.act_status ?? "—";
   if (render === "failed") return { decision: "fix-render", reason: `the unit does not build (${u.path ?? u.app})` };
+  if (act === "skipped-check-failed") return { decision: "fix-check", reason: "the 🧪 kustomize check failed (schema / removed API / image availability) — the live diff did not run" };
   if (LIVE_ERROR.has(act)) return { decision: "fix-live-error", reason: `live step ${act}` };
   if (act === "noop") return { decision: "blocked-noop", reason: "the render changes nothing ArgoCD would apply and nothing explains it — explain the intent or close the PR" };
   if (act === "new") return { decision: "review-new-app", reason: `not in ArgoCD yet — the rendered ${u.kinds ?? 0} object(s) are the whole change` };
@@ -107,6 +109,7 @@ export function buildGate(
     next_actions.push(`group ${g.name} ${g.result}: open its 🧪 kustomize check / 📋 result jobs — ${meta.run_url}`);
   }
   for (const u of blocking) {
+    if (u.decision === "fix-check") next_actions.push(`fix the 🧪 kustomize check finding for ${u.app} (its job summary / PR comment names it: ${meta.run_url})`);
     if (u.decision === "fix-render") next_actions.push(`fix the render of ${u.path || u.app} (open the 🧩 render ${u.app} job: ${meta.run_url})`);
     else if (u.decision === "fix-live-error") next_actions.push(`open the 🔍 diff ${u.app} job log and fix the ArgoCD error: ${meta.run_url}`);
     else if (u.decision === "blocked-noop") next_actions.push(`${u.app}: the PR changes nothing live — state why in the PR (a value at the wrong key? already applied?) or close it`);

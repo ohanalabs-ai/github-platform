@@ -14,6 +14,7 @@ Each unit's render result and [live verdict](verdicts.md) map to exactly one `de
 | `decision` | from | blocks the verdict |
 |---|---|---|
 | `fix-render` | render `failed` (wins over any live status) | yes |
+| `fix-check` | `skipped-check-failed` — the 🧪 kustomize check failed, so the live diff did not run | yes |
 | `fix-live-error` | `error` · `refresh-failed` · `validate-failed` | yes |
 | `blocked-noop` | `noop` — the PR changes nothing live and nothing explains it | yes |
 | `needs-human` | a live status this contract does not know | yes |

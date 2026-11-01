@@ -98,3 +98,8 @@ test("readGroups walks nested artifact dirs and skips broken JSON", () => {
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("skipped-check-failed blocks as fix-check (the live diff never ran)", () => {
+  const d = decide({ app: "a", render: "ok", act_status: "skipped-check-failed" } as Parameters<typeof decide>[0]);
+  assert.equal(d.decision, "fix-check");
+});

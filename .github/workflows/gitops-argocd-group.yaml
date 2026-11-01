@@ -486,11 +486,14 @@ jobs:
   # mode=diff → "🔍 diff <app>", mode=refresh → "♻️ refresh <app>". One job (not two
   # skipped-by-mode jobs) so the Checks UI never shows an unexpanded matrix name. After a
   # merge the job runs in the GitHub Environment <cluster>-<group>. mode=diff waits for the
-  # 🧪 kustomize check and does not run when it failed (skipped = not applicable → runs).
+  # 🧪 kustomize check; when it FAILED the job still runs (a JOB-level skip happens before the
+  # matrix expands, so the Checks UI showed the raw `${{ … }} ${{ matrix.app }}` name — seen on
+  # ohanalabs-ai/k8s-infra PR 22, 2026-11-01) and its live steps report `skipped-check-failed`
+  # instead — the same "guards on the STEPS" rule as the ArgoCD/Vault/tailnet guards.
   act:
     name: ${{ inputs.mode == 'diff' && '🔍 diff' || '♻️ refresh' }} ${{ matrix.app }}
     needs: [discover, render, check]
-    if: always() && needs.discover.result == 'success' && needs.check.result != 'failure' && needs.check.result != 'cancelled'
+    if: always() && needs.discover.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.mode == 'refresh' && (inputs.environment-name || format('{0}-{1}', inputs.cluster, inputs.group)) || inputs.pr-environment }}
@@ -504,7 +507,9 @@ jobs:
       ARGOCD_OPTS: --grpc-web
       APP: ${{ matrix.app }}
       UNIT_PATH: ${{ matrix.path }}
-      LIVE: ${{ matrix.noop != true && matrix.local == true && (inputs.mode == 'refresh' || matrix.render_only == false) }}
+      # the 🧪 kustomize check failed (mode=diff) → nothing live may run; the guard step below says so
+      CHECK_BLOCKED: ${{ inputs.mode == 'diff' && (needs.check.result == 'failure' || needs.check.result == 'cancelled') }}
+      LIVE: ${{ matrix.noop != true && matrix.local == true && (inputs.mode == 'refresh' || matrix.render_only == false) && !(inputs.mode == 'diff' && (needs.check.result == 'failure' || needs.check.result == 'cancelled')) }}
     steps:
       - name: ⏭️ no units in this group
         if: matrix.noop == true
@@ -542,9 +547,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/frag"
           { echo "#### \`$APP\` (${{ matrix.tier }}) — \`$UNIT_PATH\`"; echo; } > "$RUNNER_TEMP/frag/act-$APP.md"
 
+      - name: ⛔ kustomize check failed — live ${{ inputs.mode }} not run
+        if: matrix.noop != true && env.CHECK_BLOCKED == 'true'
+        run: |
+          jq -n --arg a "$APP" '{app:$a,status:"skipped-check-failed",note:"the 🧪 kustomize check failed — fix it first; the live diff did not run"}' > "$RUNNER_TEMP/frag/act-$APP.json"
+          echo "⛔ **Not run** — the \`🧪 kustomize check\` failed (schema / removed API / image availability); fix its error first, then the live diff runs." >> "$RUNNER_TEMP/frag/act-$APP.md"
+          echo "### ⛔ ${{ inputs.mode }}: \`$APP\` not run — the kustomize check failed" >> "$GITHUB_STEP_SUMMARY"
+
       # --- guards: everything below needs a live ArgoCD; say so instead of vanishing.
       - name: ⏭️ no ARGOCD_SERVER — live ${{ inputs.mode }} skipped
-        if: matrix.noop != true && inputs.argocd-server == ''
+        if: matrix.noop != true && inputs.argocd-server == '' && env.CHECK_BLOCKED != 'true'
         run: |
           jq -n --arg a "$APP" '{app:$a,status:"skipped-no-argocd",note:"argocd-server unset — render only"}' > "$RUNNER_TEMP/frag/act-$APP.json"
           echo "⏭️ **Skipped: not configured** — the \`ARGOCD_SERVER\` variable (workflow input \`argocd-server\`) is unset; only the render + rendered diff ran." >> "$RUNNER_TEMP/frag/act-$APP.md"
@@ -558,7 +570,7 @@ jobs:
           echo "### ⏭️ ${{ inputs.mode }}: \`$APP\` skipped — no Tailscale OAuth secrets" >> "$GITHUB_STEP_SUMMARY"
 
       - name: ⏭️ external source / render-only — nothing to ${{ inputs.mode }}
-        if: matrix.noop != true && inputs.argocd-server != '' && env.LIVE != 'true'
+        if: matrix.noop != true && inputs.argocd-server != '' && env.LIVE != 'true' && env.CHECK_BLOCKED != 'true'
         run: |
           if [ "${{ matrix.local }}" = "false" ]; then
             st=external; msg="ℹ️ **Skipped.** \`$APP\` renders \`$UNIT_PATH\` from another repository; this change only touched its ArgoCD wiring. The live state appears in ArgoCD after merge (\`argocd app diff $APP\`)."
