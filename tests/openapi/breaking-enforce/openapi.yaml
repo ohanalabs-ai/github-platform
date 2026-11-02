@@ -1,0 +1,30 @@
+openapi: 3.0.3
+info:
+  title: Fixture API
+  version: "1.0.0"
+  description: A tiny spec for the devsecops-openapi self-test.
+servers:
+  - url: https://api.example.com
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      summary: List widgets
+      description: Returns every widget.
+      tags: [widgets]
+      parameters:
+        - name: owner
+          in: query
+          required: true
+          description: Now mandatory (a breaking change).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The widgets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string

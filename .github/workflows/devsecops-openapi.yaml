@@ -1,0 +1,278 @@
+# 🧭 Reusable OpenAPI gate — the devsecops-openapi product (products/devsecops-openapi/README.md). For a repo
+# whose HTTP API is described by OpenAPI specs and whose server/client code is generated from them:
+#
+#   🔎 lint       vacuum (MIT, pinned version + SHA-256) over every spec in `spec-paths`; an error fails
+#   🔁 drift      setup-go (from go-version-file) → `generate-command` → fail when `git status --porcelain` is
+#                 non-empty; the stale files are listed in the summary
+#   💥 breaking   oasdiff (Apache-2.0, pinned version + SHA-256): each spec at the PR base vs the PR head
+#                 (skipped on push, and per spec for a new file). Fails ONLY when breaking-change-mode=enforce
+#   🧭 report     ONE sticky PR comment (hidden marker, delete-and-recreate) + outputs `breaking`, `drift`, `failed`
+#
+# ALL logic is TypeScript under actions/openapi/ run by actions/github-script (no npm, no Python, no bash
+# logic); the only subprocesses are the tools themselves. The helpers are checked out at THIS workflow's own
+# commit (`job.workflow_sha`, sparse), so a caller on `@<branch>` exercises that branch's code. Every job ends
+# with a 📋 run summary (if: always()) and never prints a secret — there are none. Third-party actions are
+# pinned by commit SHA.
+#
+# (Job output is named `data`, not `result`: actions/github-script owns an output called `result` — the script
+# return value — and overwrites a `core.setOutput("result", …)`.)
+#
+# Paths: `spec-paths` and `go-version-file` are relative to the REPOSITORY ROOT; `generate-command` runs in
+# `working-directory`. Beyond the fixed interface there are two additive optional inputs: `base-ref` (compare
+# against this ref instead of the PR base — used by the self-test) and `fail-on-findings` (false = report
+# only; the `failed` output still tells the caller what WOULD have blocked — used by the self-test).
+name: 🧭 devsecops-openapi
+run-name: "🧭 OpenAPI — lint · drift · breaking (${{ inputs.breaking-change-mode }}) · ${{ github.event_name }}"
+
+on:
+  workflow_call:
+    inputs:
+      spec-paths:
+        description: "OpenAPI spec files, one repo-relative path per line"
+        type: string
+        required: true
+      generate-command:
+        description: "Code generation command (run in working-directory); the tree must be clean afterwards. Empty = skip the drift job"
+        type: string
+        required: false
+        default: "go generate ./..."
+      go-version-file:
+        description: "File setup-go reads the Go version from (repo-root relative, e.g. go.mod or svc/go.mod)"
+        type: string
+        required: false
+        default: "go.mod"
+      working-directory:
+        description: "Directory the generate command runs in"
+        type: string
+        required: false
+        default: "."
+      breaking-change-mode:
+        description: "advisory (report only) | enforce (a breaking change fails the job)"
+        type: string
+        required: false
+        default: "advisory"
+      base-ref:
+        description: "Advanced: compare against this git ref/SHA instead of the pull request's base (empty = the PR base; on push without it the check is skipped)"
+        type: string
+        required: false
+        default: ""
+      fail-on-findings:
+        description: "Advanced: false = findings never fail a job (the `failed` output still reports them)"
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      breaking:
+        description: "true when oasdiff found at least one breaking change"
+        value: ${{ jobs.report.outputs.breaking }}
+      drift:
+        description: "true when regenerating changed the working tree"
+        value: ${{ jobs.report.outputs.drift }}
+      failed:
+        description: "true when a gate would block (lint error, drift, or breaking under enforce)"
+        value: ${{ jobs.report.outputs.failed }}
+
+permissions:
+  contents: read
+
+env:
+  PLATFORM_REPO: ohanalabs-ai/github-platform
+  HELPERS: .openapi-platform
+
+jobs:
+  lint:
+    name: 🔎 lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      data: ${{ steps.lint.outputs.data }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.HELPERS }}
+          sparse-checkout: |
+            actions/openapi
+            actions/github/run-summary
+          persist-credentials: false
+      - name: 🔎 vacuum lint
+        id: lint
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SPEC_PATHS: ${{ inputs.spec-paths }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/openapi/lint.ts`);
+            await run({ core, exec, github, context });
+      - name: 📋 run summary
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TITLE: 🔎 OpenAPI lint
+          JOB_STATUS: ${{ job.status }}
+          STEP_OUTCOMES: |
+            🔎 vacuum lint=${{ steps.lint.outcome }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/github/run-summary/summary.ts`);
+            await run({ core, exec, github, context });
+
+  drift:
+    name: 🔁 codegen drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      data: ${{ steps.drift.outputs.data }}
+      drift: ${{ steps.drift.outputs.drift }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.HELPERS }}
+          sparse-checkout: |
+            actions/openapi
+            actions/github/run-summary
+          persist-credentials: false
+      - name: 🐹 setup-go
+        id: go
+        if: ${{ inputs.generate-command != '' }}
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: false
+      - name: 🔁 generate, then git status
+        id: drift
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          GENERATE_COMMAND: ${{ inputs.generate-command }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/openapi/drift.ts`);
+            await run({ core, exec, github, context });
+      - name: 📋 run summary
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TITLE: 🔁 OpenAPI codegen drift
+          JOB_STATUS: ${{ job.status }}
+          STEP_OUTCOMES: |
+            🐹 setup-go=${{ steps.go.outcome }}
+            🔁 generate + git status=${{ steps.drift.outcome }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/github/run-summary/summary.ts`);
+            await run({ core, exec, github, context });
+
+  breaking:
+    name: 💥 breaking changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      data: ${{ steps.breaking.outputs.data }}
+      breaking: ${{ steps.breaking.outputs.breaking }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0 # the PR base is a second checkout (git worktree)
+          persist-credentials: false
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.HELPERS }}
+          sparse-checkout: |
+            actions/openapi
+            actions/github/run-summary
+          persist-credentials: false
+      - name: 💥 oasdiff breaking (base vs head)
+        id: breaking
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SPEC_PATHS: ${{ inputs.spec-paths }}
+          BREAKING_MODE: ${{ inputs.breaking-change-mode }}
+          BASE_REF: ${{ inputs.base-ref }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/openapi/breaking.ts`);
+            await run({ core, exec, github, context });
+      - name: 📋 run summary
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TITLE: 💥 OpenAPI breaking changes
+          JOB_STATUS: ${{ job.status }}
+          STEP_OUTCOMES: |
+            💥 oasdiff=${{ steps.breaking.outcome }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/github/run-summary/summary.ts`);
+            await run({ core, exec, github, context });
+
+  report:
+    name: 🧭 report
+    needs: [lint, drift, breaking]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      breaking: ${{ steps.report.outputs.breaking }}
+      drift: ${{ steps.report.outputs.drift }}
+      failed: ${{ steps.report.outputs.failed }}
+    steps:
+      - name: 📦 helpers (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: ${{ env.HELPERS }}
+          sparse-checkout: |
+            actions/openapi
+            actions/github/run-summary
+          persist-credentials: false
+      - name: 🧭 summary + sticky PR comment
+        id: report
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          LINT_RESULT: ${{ needs.lint.outputs.data }}
+          DRIFT_RESULT: ${{ needs.drift.outputs.data }}
+          BREAKING_RESULT: ${{ needs.breaking.outputs.data }}
+          COMMENT_KEY: ${{ format('{0}|{1}', inputs.working-directory, inputs.spec-paths) }}
+          TITLE: OpenAPI checks
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/openapi/report.ts`);
+            await run({ core, exec, github, context });
+      - name: 📋 run summary
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TITLE: 🧭 OpenAPI report
+          JOB_STATUS: ${{ job.status }}
+          STEP_OUTCOMES: |
+            🧭 summary + comment=${{ steps.report.outcome }}
+          FACTS: |
+            lint job=${{ needs.lint.result }}
+            drift job=${{ needs.drift.result }}
+            breaking job=${{ needs.breaking.result }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/${process.env.HELPERS}/actions/github/run-summary/summary.ts`);
+            await run({ core, exec, github, context });
