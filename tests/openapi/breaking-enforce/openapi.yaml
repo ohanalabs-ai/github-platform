@@ -12,6 +12,13 @@ paths:
       summary: List widgets
       description: Returns every widget.
       tags: [widgets]
+      parameters:
+        - name: owner
+          in: query
+          required: true
+          description: Now mandatory (a breaking change).
+          schema:
+            type: string
       responses:
         "200":
           description: The widgets.

@@ -1,0 +1,120 @@
+# 🧪 Self-test of devsecops-openapi.yaml on THIS repo's pull requests: the real reusable against the fixtures
+# under tests/openapi/, real tools (vacuum, oasdiff), real `go generate`, no secrets. Four cases, each asserted:
+#   clean              clean spec + committed generated code             → passes, drift=false, failed=false
+#   drift              generated.txt is stale                            → drift=true,  failed=true
+#   breaking-enforce   a required parameter was added vs the base commit → breaking=true, failed=true
+#   breaking-advisory  the same, advisory + default (fail-on-findings)   → the job PASSES, breaking=true,
+#                                                                         failed=false, comment says advisory
+# The two "must fail" cases run with fail-on-findings=false (an expected-red job would turn the whole run red)
+# and the verdict asserts the `failed` output — the very value each job's gate acts on. The base for the
+# breaking cases is a fixed commit (base-ref): the compatible v1 of the fixtures, committed before v2.
+# The unit tests (node:test) run in actions-typescript-selftest.yaml.
+name: 🧪 devsecops-openapi-selftest
+run-name: "🧪 devsecops-openapi self-test · ${{ github.event_name }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/devsecops-openapi*.yaml"
+      - "actions/openapi/**"
+      - "actions/github/run-summary/**"
+      - "tests/openapi/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/devsecops-openapi*.yaml"
+      - "actions/openapi/**"
+      - "tests/openapi/**"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: 🚨 actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: ⚙️ actionlint
+        run: docker run --rm -v "$PWD":/repo --workdir /repo rhysd/actionlint:1.7.12 -color -ignore 'property "(workflow_sha|job_workflow_sha)" is not defined' .github/workflows/devsecops-openapi.yaml .github/workflows/devsecops-openapi-selftest.yaml
+
+  clean:
+    name: ✅ clean
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/clean/openapi.yaml
+      go-version-file: tests/openapi/clean/go.mod
+      working-directory: tests/openapi/clean
+
+  drift:
+    name: 🔁 drift
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/drift/openapi.yaml
+      go-version-file: tests/openapi/drift/go.mod
+      working-directory: tests/openapi/drift
+      fail-on-findings: false
+
+  breaking-enforce:
+    name: 💥 breaking · enforce
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/breaking-enforce/openapi.yaml
+      generate-command: ""
+      breaking-change-mode: enforce
+      base-ref: 5e6ce5fb44da4df332e32bacbc5c2cc238fa39ef
+      fail-on-findings: false
+
+  breaking-advisory:
+    name: 💥 breaking · advisory
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/breaking-advisory/openapi.yaml
+      generate-command: ""
+      breaking-change-mode: advisory
+      base-ref: 5e6ce5fb44da4df332e32bacbc5c2cc238fa39ef
+
+  verdict:
+    name: 🧾 verdict
+    needs: [clean, drift, breaking-enforce, breaking-advisory]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: each case produced exactly its expected verdict
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const needs = JSON.parse(process.env.NEEDS);
+            const want = {
+              'clean':             { result: 'success', breaking: 'false', drift: 'false', failed: 'false' },
+              'drift':             { result: 'success', breaking: 'false', drift: 'true',  failed: 'true' },
+              'breaking-enforce':  { result: 'success', breaking: 'true',  drift: 'false', failed: 'true' },
+              'breaking-advisory': { result: 'success', breaking: 'true',  drift: 'false', failed: 'false' },
+            };
+            const rows = ['| Case | job | breaking | drift | failed | verdict |', '|---|---|---|---|---|---|'];
+            const bad = [];
+            for (const [name, w] of Object.entries(want)) {
+              const n = needs[name] || { result: 'missing', outputs: {} };
+              const got = { result: n.result, breaking: n.outputs?.breaking, drift: n.outputs?.drift, failed: n.outputs?.failed };
+              const ok = Object.keys(w).every((k) => got[k] === w[k]);
+              if (!ok) bad.push(`${name}: expected ${JSON.stringify(w)}, got ${JSON.stringify(got)}`);
+              rows.push(`| ${name} | ${got.result} | ${got.breaking} | ${got.drift} | ${got.failed} | ${ok ? '✅' : '❌'} |`);
+            }
+            await core.summary.addRaw(['## 🧾 devsecops-openapi self-test', '', ...rows, ''].join('\n'), true).write();
+            if (bad.length) core.setFailed(bad.join('\n'));
