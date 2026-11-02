@@ -5,7 +5,13 @@
 #   🔁 drift      setup-go (from go-version-file) → `generate-command` → fail when `git status --porcelain` is
 #                 non-empty; the stale files are listed in the summary
 #   💥 breaking   oasdiff (Apache-2.0, pinned version + SHA-256): each spec at the PR base vs the PR head
-#                 (skipped on push, and per spec for a new file). Fails ONLY when breaking-change-mode=enforce
+#                 (skipped on push, and per spec for a new file). Fails ONLY when breaking-change-mode=enforce.
+#                 `breaking-ignore-file` (optional) names a file in the CALLER repo of INTENTIONAL breaking
+#                 changes to accept — oasdiff's native `--err-ignore` format, one line per change, each ending
+#                 ` # <reason>` (a line without a reason fails the job). Enforce still fails on every OTHER
+#                 breaking change; accepted entries + reasons and STALE entries (they match no breaking change
+#                 any more — a warning, never a failure) are listed in the run summary and the PR comment.
+#                 Empty input / missing file / no entries = exactly the behaviour without the input.
 #   🧭 report     ONE sticky PR comment (hidden marker, delete-and-recreate) + outputs `breaking`, `drift`, `failed`
 #
 # ALL logic is TypeScript under actions/openapi/ run by actions/github-script (no npm, no Python, no bash
@@ -18,9 +24,10 @@
 # return value — and overwrites a `core.setOutput("result", …)`.)
 #
 # Paths: `spec-paths` and `go-version-file` are relative to the REPOSITORY ROOT; `generate-command` runs in
-# `working-directory`. Beyond the fixed interface there are two additive optional inputs: `base-ref` (compare
-# against this ref instead of the PR base — used by the self-test) and `fail-on-findings` (false = report
-# only; the `failed` output still tells the caller what WOULD have blocked — used by the self-test).
+# `working-directory`. Beyond the fixed interface there are three additive optional inputs: `breaking-ignore-file`
+# (above), `base-ref` (compare against this ref instead of the PR base — used by the self-test) and
+# `fail-on-findings` (false = report only; the `failed` output still tells the caller what WOULD have blocked
+# — used by the self-test).
 name: 🧭 devsecops-openapi
 run-name: "🧭 OpenAPI — lint · drift · breaking (${{ inputs.breaking-change-mode }}) · ${{ github.event_name }}"
 
@@ -51,6 +58,11 @@ on:
         type: string
         required: false
         default: "advisory"
+      breaking-ignore-file:
+        description: "Repo-relative file of INTENTIONAL breaking changes to accept (oasdiff --err-ignore format: `<METHOD> <path> <oasdiff text> # <reason>` per line). Empty = accept nothing"
+        type: string
+        required: false
+        default: ""
       base-ref:
         description: "Advanced: compare against this git ref/SHA instead of the pull request's base (empty = the PR base; on push without it the check is skipped)"
         type: string
@@ -71,6 +83,12 @@ on:
       failed:
         description: "true when a gate would block (lint error, drift, or breaking under enforce)"
         value: ${{ jobs.report.outputs.failed }}
+      breaking-accepted:
+        description: "number of breaking changes accepted by breaking-ignore-file"
+        value: ${{ jobs.breaking.outputs.accepted }}
+      breaking-stale:
+        description: "number of breaking-ignore-file entries that match no breaking change (stale — a warning, never a failure)"
+        value: ${{ jobs.breaking.outputs.stale }}
 
 permissions:
   contents: read
@@ -183,6 +201,8 @@ jobs:
     outputs:
       data: ${{ steps.breaking.outputs.data }}
       breaking: ${{ steps.breaking.outputs.breaking }}
+      accepted: ${{ steps.breaking.outputs.accepted }}
+      stale: ${{ steps.breaking.outputs.stale }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -205,6 +225,7 @@ jobs:
           SPEC_PATHS: ${{ inputs.spec-paths }}
           BREAKING_MODE: ${{ inputs.breaking-change-mode }}
           BASE_REF: ${{ inputs.base-ref }}
+          BREAKING_IGNORE_FILE: ${{ inputs.breaking-ignore-file }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         with:
           script: |

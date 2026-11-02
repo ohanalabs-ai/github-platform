@@ -1,0 +1,1 @@
+GET /widgets the `query` request parameter `owner` became required # fixture: owner is now mandatory on purpose

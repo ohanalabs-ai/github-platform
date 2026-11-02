@@ -1,10 +1,18 @@
 # 🧪 Self-test of devsecops-openapi.yaml on THIS repo's pull requests: the real reusable against the fixtures
-# under tests/openapi/, real tools (vacuum, oasdiff), real `go generate`, no secrets. Four cases, each asserted:
+# under tests/openapi/, real tools (vacuum, oasdiff), real `go generate`, no secrets. Nine cases, each asserted:
 #   clean              clean spec + committed generated code             → passes, drift=false, failed=false
 #   drift              generated.txt is stale                            → drift=true,  failed=true
 #   breaking-enforce   a required parameter was added vs the base commit → breaking=true, failed=true
 #   breaking-advisory  the same, advisory + default (fail-on-findings)   → the job PASSES, breaking=true,
 #                                                                         failed=false, comment says advisory
+#   ignore-*           `breaking-ignore-file` (intentional breaking changes) on a spec with TWO breaking changes
+#                      (base = the v1 commit of tests/openapi/breaking-ignore), mode enforce:
+#     ignore-accepted  both listed, each with a reason  → the job really PASSES (fail-on-findings left on):
+#                                                         breaking=false, failed=false, accepted=2, stale=0
+#     ignore-partial   only one listed                  → the OTHER still fails: breaking=true, failed=true, accepted=1
+#     ignore-stale     both + an entry matching nothing → still passes; stale=1 is reported (a warning, not a failure)
+#     ignore-empty     file with no entries             → exactly as without the input: breaking=true, failed=true
+#     ignore-missing   file does not exist              → exactly as without the input: breaking=true, failed=true
 # The two "must fail" cases run with fail-on-findings=false (an expected-red job would turn the whole run red)
 # and the verdict asserts the `failed` output — the very value each job's gate acts on. The base for the
 # breaking cases is a fixed commit (base-ref): the compatible v1 of the fixtures, committed before v2.
@@ -88,9 +96,77 @@ jobs:
       breaking-change-mode: advisory
       base-ref: 5e6ce5fb44da4df332e32bacbc5c2cc238fa39ef
 
+  ignore-accepted:
+    name: 🤝 ignore · accepted
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/breaking-ignore/openapi.yaml
+      generate-command: ""
+      breaking-change-mode: enforce
+      breaking-ignore-file: tests/openapi/breaking-ignore/ignore-all.txt
+      base-ref: 95172e35e820324898736dfb914f9d0c7e4c0faa
+
+  ignore-partial:
+    name: 🤝 ignore · partial
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/breaking-ignore/openapi.yaml
+      generate-command: ""
+      breaking-change-mode: enforce
+      breaking-ignore-file: tests/openapi/breaking-ignore/ignore-partial.txt
+      base-ref: 95172e35e820324898736dfb914f9d0c7e4c0faa
+      fail-on-findings: false
+
+  ignore-stale:
+    name: 🤝 ignore · stale
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/breaking-ignore/openapi.yaml
+      generate-command: ""
+      breaking-change-mode: enforce
+      breaking-ignore-file: tests/openapi/breaking-ignore/ignore-stale.txt
+      base-ref: 95172e35e820324898736dfb914f9d0c7e4c0faa
+
+  ignore-empty:
+    name: 🤝 ignore · empty file
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/breaking-ignore/openapi.yaml
+      generate-command: ""
+      breaking-change-mode: enforce
+      breaking-ignore-file: tests/openapi/breaking-ignore/ignore-empty.txt
+      base-ref: 95172e35e820324898736dfb914f9d0c7e4c0faa
+      fail-on-findings: false
+
+  ignore-missing:
+    name: 🤝 ignore · missing file
+    uses: ./.github/workflows/devsecops-openapi.yaml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      spec-paths: tests/openapi/breaking-ignore/openapi.yaml
+      generate-command: ""
+      breaking-change-mode: enforce
+      breaking-ignore-file: tests/openapi/breaking-ignore/does-not-exist.txt
+      base-ref: 95172e35e820324898736dfb914f9d0c7e4c0faa
+      fail-on-findings: false
+
   verdict:
     name: 🧾 verdict
-    needs: [clean, drift, breaking-enforce, breaking-advisory]
+    needs: [clean, drift, breaking-enforce, breaking-advisory, ignore-accepted, ignore-partial, ignore-stale, ignore-empty, ignore-missing]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -106,15 +182,21 @@ jobs:
               'drift':             { result: 'success', breaking: 'false', drift: 'true',  failed: 'true' },
               'breaking-enforce':  { result: 'success', breaking: 'true',  drift: 'false', failed: 'true' },
               'breaking-advisory': { result: 'success', breaking: 'true',  drift: 'false', failed: 'false' },
+              // breaking-ignore-file: accepted / stale are the reusable's `breaking-accepted` / `breaking-stale` outputs
+              'ignore-accepted':   { result: 'success', breaking: 'false', drift: 'false', failed: 'false', accepted: '2', stale: '0' },
+              'ignore-partial':    { result: 'success', breaking: 'true',  drift: 'false', failed: 'true',  accepted: '1', stale: '0' },
+              'ignore-stale':      { result: 'success', breaking: 'false', drift: 'false', failed: 'false', accepted: '2', stale: '1' },
+              'ignore-empty':      { result: 'success', breaking: 'true',  drift: 'false', failed: 'true',  accepted: '0', stale: '0' },
+              'ignore-missing':    { result: 'success', breaking: 'true',  drift: 'false', failed: 'true',  accepted: '0', stale: '0' },
             };
-            const rows = ['| Case | job | breaking | drift | failed | verdict |', '|---|---|---|---|---|---|'];
+            const rows = ['| Case | job | breaking | drift | failed | accepted | stale | verdict |', '|---|---|---|---|---|---|---|---|'];
             const bad = [];
             for (const [name, w] of Object.entries(want)) {
               const n = needs[name] || { result: 'missing', outputs: {} };
-              const got = { result: n.result, breaking: n.outputs?.breaking, drift: n.outputs?.drift, failed: n.outputs?.failed };
-              const ok = Object.keys(w).every((k) => got[k] === w[k]);
+              const got = { result: n.result, breaking: n.outputs?.breaking, drift: n.outputs?.drift, failed: n.outputs?.failed, accepted: n.outputs?.['breaking-accepted'], stale: n.outputs?.['breaking-stale'] };
+              const ok = Object.keys(w).every((k) => got[k] === w[k]); // only the keys a case names are asserted
               if (!ok) bad.push(`${name}: expected ${JSON.stringify(w)}, got ${JSON.stringify(got)}`);
-              rows.push(`| ${name} | ${got.result} | ${got.breaking} | ${got.drift} | ${got.failed} | ${ok ? '✅' : '❌'} |`);
+              rows.push(`| ${name} | ${got.result} | ${got.breaking} | ${got.drift} | ${got.failed} | ${got.accepted ?? '–'} | ${got.stale ?? '–'} | ${ok ? '✅' : '❌'} |`);
             }
             await core.summary.addRaw(['## 🧾 devsecops-openapi self-test', '', ...rows, ''].join('\n'), true).write();
             if (bad.length) core.setFailed(bad.join('\n'));

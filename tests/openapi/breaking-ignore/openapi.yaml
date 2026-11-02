@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Fixture API
   version: "1.0.0"
-  description: A tiny spec for the devsecops-openapi breaking-ignore self-test (v1 — the compatible base).
+  description: A tiny spec for the devsecops-openapi breaking-ignore self-test (v2 — two breaking changes).
 servers:
   - url: https://api.example.com
 paths:
@@ -15,8 +15,8 @@ paths:
       parameters:
         - name: owner
           in: query
-          required: false
-          description: Optional filter.
+          required: true
+          description: Now mandatory (a breaking change).
           schema:
             type: string
       responses:
@@ -37,8 +37,8 @@ paths:
       parameters:
         - name: tenant
           in: query
-          required: false
-          description: Optional filter.
+          required: true
+          description: Now mandatory (a breaking change).
           schema:
             type: string
       responses:
