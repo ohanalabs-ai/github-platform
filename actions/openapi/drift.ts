@@ -2,7 +2,7 @@
 // `git status --porcelain` is non-empty: the committed generated code does not match the spec. The files
 // are listed in the summary. The reusable's own helper checkout (.openapi-platform) is excluded.
 // env: GENERATE_COMMAND, WORKING_DIRECTORY (cwd of the command), FAIL_ON_FINDINGS ("false" → report only).
-// Output: result (DriftResult JSON), drift (true|false).
+// Output: data (DriftResult JSON), drift (true|false).
 import { parsePorcelain, renderDrift, safeWorkdir, type DriftResult } from "./lib.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -29,11 +29,11 @@ export default async function run({ core, exec }: { core: any; exec: any; github
       }
     }
     core.setOutput("drift", String(result.drift));
-    core.setOutput("result", JSON.stringify(result));
+    core.setOutput("data", JSON.stringify(result));
   } catch (e: any) {
     failure = String(e?.message || e);
     core.setOutput("drift", "false");
-    core.setOutput("result", JSON.stringify({ ...result, generateExit: 1 }));
+    core.setOutput("data", JSON.stringify({ ...result, generateExit: 1 }));
     core.setFailed(failure);
   } finally {
     await core.summary.addRaw(failure ? `### 🔁 Codegen drift\n\n❌ ${failure}\n` : renderDrift(result), true).write();

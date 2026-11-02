@@ -3,7 +3,7 @@
 // anything but a pull request (unless BASE_REF is set), and per spec when the file is new in the PR.
 // Only oasdiff level 3 (error) counts as breaking. It fails ONLY when BREAKING_MODE=enforce.
 // env: SPEC_PATHS, BREAKING_MODE (advisory|enforce), BASE_REF (optional override of the PR base — a SHA/ref),
-//      FAIL_ON_FINDINGS ("false" → report only). Output: result (BreakingResult JSON), breaking (true|false).
+//      FAIL_ON_FINDINGS ("false" → report only). Output: data (BreakingResult JSON), breaking (true|false).
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { parseSpecPaths, parseMode, parseOasdiff, breakingCount, renderBreaking, type BreakingResult, type BreakingSpec, type Mode } from "./lib.ts";
@@ -42,11 +42,11 @@ export default async function run({ core, exec, context }: { core: any; exec: an
       await exec.exec("git", ["worktree", "remove", "--force", wt], { ignoreReturnCode: true, silent: true });
     }
     core.setOutput("breaking", String(result.breaking));
-    core.setOutput("result", JSON.stringify(result));
+    core.setOutput("data", JSON.stringify(result));
   } catch (e: any) {
     failure = String(e?.message || e);
     core.setOutput("breaking", "false");
-    core.setOutput("result", JSON.stringify({ ...result, skipped: `error: ${failure}` }));
+    core.setOutput("data", JSON.stringify({ ...result, skipped: `error: ${failure}` }));
     core.setFailed(failure);
   } finally {
     await core.summary.addRaw(failure ? `### 💥 Breaking changes (oasdiff)\n\n❌ ${failure}\n` : renderBreaking(result), true).write();

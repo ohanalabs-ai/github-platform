@@ -1,5 +1,5 @@
 // 🔎 devsecops-openapi · lint — vacuum (pinned, checksummed) over every spec in SPEC_PATHS; any error fails.
-// env: SPEC_PATHS (newline list), FAIL_ON_FINDINGS ("false" → report only). Output: result (LintResult JSON).
+// env: SPEC_PATHS (newline list), FAIL_ON_FINDINGS ("false" → report only). Output: data (LintResult JSON).
 // Writes its own step summary in a `finally`, so a crash still summarizes. No secrets are read or printed.
 import { parseSpecPaths, parseVacuum, renderLint, gate, type LintResult } from "./lib.ts";
 import { install, VACUUM } from "./tools.ts";
@@ -21,10 +21,10 @@ export default async function run({ core, exec }: { core: any; exec: any; github
       result.specs.push(spec);
     }
     result.failed = result.specs.some((s) => !s.ok);
-    core.setOutput("result", JSON.stringify({ specs: result.specs.map((s) => ({ ...s, detail: "" })), failed: result.failed }));
+    core.setOutput("data", JSON.stringify({ specs: result.specs.map((s) => ({ ...s, detail: "" })), failed: result.failed }));
   } catch (e: any) {
     failure = String(e?.message || e);
-    core.setOutput("result", JSON.stringify({ specs: [], failed: true }));
+    core.setOutput("data", JSON.stringify({ specs: [], failed: true }));
     core.setFailed(failure);
   } finally {
     const md = failure ? `### 🔎 Lint (vacuum)\n\n❌ ${failure}\n` : result ? renderLint(result) : "### 🔎 Lint (vacuum)\n\n⏭️ nothing ran\n";

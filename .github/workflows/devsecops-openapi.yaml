@@ -14,6 +14,9 @@
 # with a 📋 run summary (if: always()) and never prints a secret — there are none. Third-party actions are
 # pinned by commit SHA.
 #
+# (Job output is named `data`, not `result`: actions/github-script owns an output called `result` — the script
+# return value — and overwrites a `core.setOutput("result", …)`.)
+#
 # Paths: `spec-paths` and `go-version-file` are relative to the REPOSITORY ROOT; `generate-command` runs in
 # `working-directory`. Beyond the fixed interface there are two additive optional inputs: `base-ref` (compare
 # against this ref instead of the PR base — used by the self-test) and `fail-on-findings` (false = report
@@ -82,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      result: ${{ steps.lint.outputs.result }}
+      data: ${{ steps.lint.outputs.data }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -125,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
-      result: ${{ steps.drift.outputs.result }}
+      data: ${{ steps.drift.outputs.data }}
       drift: ${{ steps.drift.outputs.drift }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -178,7 +181,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      result: ${{ steps.breaking.outputs.result }}
+      data: ${{ steps.breaking.outputs.data }}
       breaking: ${{ steps.breaking.outputs.breaking }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -248,9 +251,9 @@ jobs:
         id: report
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          LINT_RESULT: ${{ needs.lint.outputs.result }}
-          DRIFT_RESULT: ${{ needs.drift.outputs.result }}
-          BREAKING_RESULT: ${{ needs.breaking.outputs.result }}
+          LINT_RESULT: ${{ needs.lint.outputs.data }}
+          DRIFT_RESULT: ${{ needs.drift.outputs.data }}
+          BREAKING_RESULT: ${{ needs.breaking.outputs.data }}
           COMMENT_KEY: ${{ format('{0}|{1}', inputs.working-directory, inputs.spec-paths) }}
           TITLE: OpenAPI checks
         with:
