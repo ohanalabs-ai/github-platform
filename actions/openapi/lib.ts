@@ -61,8 +61,15 @@ export function tail(text: string, lines: number): string {
 
 export interface Change { id: string; text: string; level: number; operation?: string; path?: string }
 export type BreakingStatus = "compared" | "new-file" | "removed-in-head" | "error";
-export interface BreakingSpec { path: string; status: BreakingStatus; changes: Change[]; note?: string }
-export interface BreakingResult { mode: Mode; skipped?: string; specs: BreakingSpec[]; breaking: boolean }
+/** A breaking change the caller's ignore file accepted, with the entry's human reason. */
+export interface AcceptedChange { change: Change; reason: string; entry?: number }
+/** `changes` is what is STILL reported after the ignore file was applied; `accepted` is what it waved through. */
+export interface BreakingSpec { path: string; status: BreakingStatus; changes: Change[]; note?: string; accepted?: AcceptedChange[] }
+export interface BreakingResult {
+  mode: Mode; skipped?: string; specs: BreakingSpec[]; breaking: boolean;
+  /** breaking-ignore-file: the path asked for, what became of it, and the entries that matched nothing. */
+  ignoreFile?: string; ignoreNote?: string; entries?: IgnoreEntry[]; stale?: IgnoreEntry[];
+}
 
 /** oasdiff `breaking -f json`: an array of changes, level 1 info · 2 warning · 3 error. Only level 3 is breaking. */
 export function parseOasdiff(json: string): Change[] {
@@ -75,6 +82,74 @@ export function parseOasdiff(json: string): Change[] {
 
 export const isBreaking = (c: Change): boolean => c.level >= 3;
 export const breakingCount = (specs: BreakingSpec[]): number => specs.reduce((n, s) => n + s.changes.filter(isBreaking).length, 0);
+
+export const acceptedCount = (specs: BreakingSpec[]): number => specs.reduce((n, s) => n + (s.accepted?.length ?? 0), 0);
+
+// ---- breaking-ignore-file (intentional breaking changes) ----------------------------------------------
+//
+// The file is oasdiff's NATIVE `--err-ignore` format: one line per accepted change, written exactly as
+// `oasdiff breaking` names it — `<METHOD> <path> <text>` (matched case-insensitively). We add one rule on
+// top: every entry ends with ` # <reason>` (oasdiff matches by containment, so the trailing comment is
+// harmless to it). Blank lines and lines that start with `#` are ignored.
+
+export interface IgnoreEntry { line: number; entry: string; reason: string }
+
+/** Repo-relative file path (same safety rules as a spec path). */
+export function safeRepoFile(v: string | undefined, name: string): string {
+  const p = (v || "").trim();
+  if (p.startsWith("/") || p.split("/").includes("..") || !/^[A-Za-z0-9._\-/@+]+$/.test(p)) {
+    throw new Error(`${name} must be a repo-relative path made of [A-Za-z0-9._-/@+] (got ${JSON.stringify(p)})`);
+  }
+  return p;
+}
+
+/** Parse the ignore file. Throws when an entry has no reason — an unexplained exception is not accepted. */
+export function parseIgnoreFile(text: string): IgnoreEntry[] {
+  const out: IgnoreEntry[] = [];
+  (text || "").split("\n").forEach((raw, i) => {
+    const l = raw.replace(/\r$/, "").trim();
+    if (!l || l.startsWith("#")) return;
+    const at = l.indexOf(" # ");
+    const entry = (at < 0 ? l : l.slice(0, at)).trim();
+    const reason = at < 0 ? "" : l.slice(at + 3).trim();
+    if (!reason) throw new Error(`ignore file line ${i + 1}: entry has no reason — write "<METHOD> <path> <oasdiff text> # <why this breaking change is intentional>"`);
+    if (!entry) throw new Error(`ignore file line ${i + 1}: empty entry before the "# reason"`);
+    out.push({ line: i + 1, entry, reason });
+  });
+  return out;
+}
+
+/** What `oasdiff breaking` calls a change, and what an ignore entry must contain: `<METHOD> <path> <text>`. */
+export const changeKey = (c: Change): string => [c.operation, c.path, c.text].filter((x) => x).join(" ");
+const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
+export const entryMatches = (entry: string, c: Change): boolean => norm(entry).includes(norm(changeKey(c)));
+
+/** Entries only (no reasons), one per line — what is handed to `oasdiff --err-ignore`. */
+export const toOasdiffIgnore = (entries: IgnoreEntry[]): string => entries.map((e) => e.entry).join("\n") + "\n";
+
+const sig = (c: Change): string => `${c.id}\u0000${changeKey(c)}`;
+
+/** The breaking (level 3) changes in `all` that oasdiff no longer reports in `remaining` (multiset difference),
+ *  each attributed to the first entry that names it. */
+export function acceptedChanges(all: Change[], remaining: Change[], entries: IgnoreEntry[]): AcceptedChange[] {
+  const left = new Map<string, number>();
+  for (const c of remaining.filter(isBreaking)) left.set(sig(c), (left.get(sig(c)) ?? 0) + 1);
+  const out: AcceptedChange[] = [];
+  for (const c of all.filter(isBreaking)) {
+    const n = left.get(sig(c)) ?? 0;
+    if (n > 0) { left.set(sig(c), n - 1); continue; }
+    const e = entries.find((x) => entryMatches(x.entry, c));
+    out.push({ change: c, reason: e?.reason ?? "(accepted by oasdiff's ignore matching)", entry: e?.line });
+  }
+  return out;
+}
+
+/** Entries that name none of the breaking changes seen across ALL specs — the change is gone (merged into the
+ *  base, reverted) or the text drifted; either way the entry accepts nothing and should be deleted. */
+export function staleEntries(entries: IgnoreEntry[], seen: Change[]): IgnoreEntry[] {
+  const br = seen.filter(isBreaking);
+  return entries.filter((e) => !br.some((c) => entryMatches(e.entry, c)));
+}
 
 // ---- drift --------------------------------------------------------------------------------------------
 
@@ -144,6 +219,24 @@ export function renderBreaking(r: BreakingResult): string {
     if (s.note) md.push(`- \`${s.path}\`: ${esc(s.note)}`);
     for (const c of list.slice(0, 30)) md.push(`- 💥 \`${s.path}\` ${c.operation ?? ""} ${c.path ?? ""} — ${esc(c.text)} (\`${c.id}\`)`);
     if (list.length > 30) md.push(`- … and ${list.length - 30} more in \`${s.path}\``);
+  }
+  const acc = r.specs.flatMap((x) => (x.accepted ?? []).map((a) => ({ spec: x.path, ...a })));
+  if (acc.length || r.stale?.length || r.ignoreNote) {
+    md.push("", `#### 🤝 Intentional breaking changes (\`${r.ignoreFile}\`)`, "");
+    if (r.ignoreNote) md.push(`- ${esc(r.ignoreNote)}`, "");
+    if (acc.length) md.push(`✅ **${acc.length} accepted** — listed in the ignore file, each with its reason:`, "", "| Spec | Change | Reason |", "|---|---|---|");
+    for (const a of acc.slice(0, 60)) md.push(`| \`${a.spec}\` | ${esc(`${a.change.operation ?? ""} ${a.change.path ?? ""} — ${a.change.text}`)} | ${esc(a.reason)} |`);
+    if (acc.length > 60) md.push(`| … | and ${acc.length - 60} more | |`);
+    if (r.stale?.length) {
+      md.push("", `⚠️ **${r.stale.length} stale entr${r.stale.length === 1 ? "y" : "ies"}** — matches no breaking change any more (merged into the base, reverted or reworded). It accepts nothing; delete it:`, "");
+      for (const e of r.stale.slice(0, 30)) md.push(`- line ${e.line}: \`\` ${esc(e.entry)} \`\` — _${esc(e.reason)}_`);
+    }
+  }
+  const open = r.specs.flatMap((x) => x.changes.filter(isBreaking));
+  if (open.length && r.ignoreFile) {
+    md.push("", "<details><summary>To accept the remaining change(s) as intentional, add to the ignore file</summary>", "", "```");
+    for (const c of open.slice(0, 30)) md.push(`${changeKey(c)} # <why this breaking change is intentional>`);
+    md.push("```", "", "</details>");
   }
   if (r.breaking) md.push("", r.mode === "enforce" ? "**Blocking** — `breaking-change-mode: enforce`." : "_Advisory — not blocking (`breaking-change-mode: advisory`)._");
   return md.join("\n") + "\n";

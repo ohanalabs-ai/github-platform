@@ -1,0 +1,3 @@
+# Both intentional changes of the v2 fixture, each with its reason.
+GET /widgets the `query` request parameter `owner` became required # fixture: owner is now mandatory on purpose
+GET /gadgets the `query` request parameter `tenant` became required # fixture: tenant is now mandatory on purpose
