@@ -95,6 +95,7 @@ case "$1 $2" in
   "app diff")
     n=$(grep -c '^app diff' "$log")
     if [ "$n" -le "${STUB_CACHE_MISSES:-0}" ]; then echo "rpc error: code = Unknown desc = error getting cached app managed resources: cache: key is missing"; exit 20; fi
+    if [ "$n" -le "${STUB_EMPTY_LIVE:-0}" ]; then echo '{"level":"fatal","msg":"Object '"'"'Kind'"'"' is missing in '"'"'{}'"'"'"}'; exit 20; fi
     [ "${STUB_DIFF_RC:-1}" = 1 ] && echo "===== apps/Deployment demo/web ====== (stub diff)"
     exit "${STUB_DIFF_RC:-1}" ;;
   "app get") echo '{}'; exit 0 ;;
@@ -111,7 +112,7 @@ frag prune '"added":0,"changed":0,"removed":2,"objects":{"added":[],"changed":[]
 verdict() { # <case> <diff-rc> <in-argocd> <frag> <block-noop> [misses] → status
   local c="$1"; local d="$W/v-$c"; mkdir -p "$d"
   rm -f "$d/stub.log"; : > "$d/out"
-  ( cd "$root" && PATH="$stub:$PATH" STUB_LOG="$d/stub.log" STUB_DIFF_RC="$2" STUB_CACHE_MISSES="${6:-0}" \
+  ( cd "$root" && PATH="$stub:$PATH" STUB_LOG="$d/stub.log" STUB_DIFF_RC="$2" STUB_CACHE_MISSES="${6:-0}" STUB_EMPTY_LIVE="${7:-0}" \
       APP=web UNIT_PATH=tests/gitops/fixtures/kustomize/head/app DIFF_REV=0000000000000000000000000000000000000001 BASE_SHA="" \
       IN_ARGOCD="$3" RENDER_FRAG="$W/frag-$4.json" BLOCK_NOOP="$5" FRAG_DIR="$d" DIFF_OUT="$d/diff.txt" RETRY_SLEEP=0 \
       GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary.md" bash "$A/argocd-diff/argocd-diff.sh" >/dev/null 2>&1 )
@@ -136,6 +137,10 @@ check "cache-miss retry → diff after 2 misses" "[ \"\$(verdict retry 1 true ch
 check "retry refreshed with 'app get --refresh -o json' twice" "[ \"\$(grep -c 'app get web --refresh -o json' $W/v-retry/stub.log)\" = 2 ]"
 check "never 'app get … -o name'" "! grep -q 'app get.*-o name' $W/v-retry/stub.log"
 check "3 misses → error" "[ \"\$(verdict retry3 1 true change true 3)\" = error ]"
+# poisoned cached diff ("Object 'Kind' is missing in '{}'") → HARD refresh, then retry
+check "empty-live retry → diff after 2 failures" "[ \"\$(verdict emptylive 1 true change true 0 2)\" = diff ]"
+check "empty-live hard-refreshed twice" "[ \"\$(grep -c 'app get web --hard-refresh -o json' $W/v-emptylive/stub.log)\" = 2 ]"
+check "3 empty-live failures → error" "[ \"\$(verdict emptylive3 1 true change true 0 3)\" = error ]"
 # meta: a unit whose only changed files are docs — needs git; use this repo's own history if available
 if git -C "$root" rev-parse HEAD >/dev/null 2>&1; then
   d="$W/v-meta"; mkdir -p "$d"; : > "$d/out"
