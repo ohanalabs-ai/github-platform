@@ -25,6 +25,7 @@
 #                       message names the rendered objects that changed and why live is empty
 #   noop                exit 0, render empty AND live empty — FAIL: the PR changes nothing
 #
+# Empty cached live state: see the second retry branch below ("Object 'Kind' is missing").
 # Cache misses: the diff reads ArgoCD's CACHED managed resources; cold after a Redis
 # restart and rewritten during every reconcile, so a read can race a refresh ("cache: key
 # is missing"). Up to 3 attempts — nudge a refresh (`argocd app get --refresh -o json`;
@@ -67,6 +68,16 @@ else
     if [ "$rc" -gt 1 ] && grep -q 'cache: key is missing' "$DIFF_OUT"; then
       echo "::notice::$APP: managed-resources cache miss (attempt $attempt/$RETRIES) — refreshing and retrying"
       argocd app get "$APP" --refresh -o json >/dev/null 2>&1 || true
+      sleep "$RETRY_SLEEP"; continue
+    fi
+    # Poisoned cache entry: with controller.diff.server.side the controller REUSES a cached diff
+    # while the live resourceVersion is unchanged, and an entry cached as normalizedLiveState "{}"
+    # makes the CLI die with "Object 'Kind' is missing in '{}'" (it json-unmarshals every
+    # normalized live state). Only a requested refresh bypasses that cache, so ask for a HARD
+    # one (it recomputes every diff and rewrites the entry), wait for the reconcile, retry.
+    if [ "$rc" -gt 1 ] && grep -q "Object 'Kind' is missing in '{}'" "$DIFF_OUT"; then
+      echo "::notice::$APP: empty normalizedLiveState in ArgoCD's cached diff (attempt $attempt/$RETRIES) — hard-refreshing and retrying"
+      argocd app get "$APP" --hard-refresh -o json >/dev/null 2>&1 || true
       sleep "$RETRY_SLEEP"; continue
     fi
     break

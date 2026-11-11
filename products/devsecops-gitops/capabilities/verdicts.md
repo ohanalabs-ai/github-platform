@@ -34,3 +34,7 @@ Added 2026-09-22 (owner-approved). Before it, this PR shape was **blocked** as `
 ## Cache misses
 
 The diff reads ArgoCD's cached managed resources; the cache is cold after a Redis restart and rewritten during every reconcile, so a read can race a refresh (`error getting cached app managed resources: cache: key is missing`). Up to 3 attempts, each preceded by `argocd app get <app> --refresh -o json` and a 25 s pause. `argocd app get` has **no** `-o name` output format (`json|yaml|wide|tree`; the CLI exits 20 before any request) — only `app list -o name` is valid; the self-test asserts it.
+
+## Empty cached live state (`Object 'Kind' is missing in '{}'`)
+
+With `controller.diff.server.side: "true"` the application controller **reuses** a cached diff while the live `resourceVersion` is unchanged (`useDiffCache` keeps the cache even when the status is expired). An entry cached as `normalizedLiveState: "{}"` therefore never heals on its own, and `argocd app diff` exits 20 with `{"level":"fatal","msg":"Object 'Kind' is missing in '{}'"}` because the CLI json-unmarshals every normalized live state. Only a *requested* refresh bypasses the cache, so the retry loop answers this error with `argocd app get <app> --hard-refresh -o json`, a 25 s pause and another diff (same 3 attempts as a cache miss). Seen 2026-11-11 on `ohanalabs-ai/k8s-infra#54` (`rekorda-prd-memories`, `rekorda-prd-vionix-engram`): every Service/ConfigMap/HTTPRoute/NetworkPolicy untouched since 2026-11-01 carried `"{}"`, the Deployment (recently modified) a full object.
