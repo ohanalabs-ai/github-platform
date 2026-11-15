@@ -93,7 +93,7 @@ goes red there (shift-left). An empty `image_ref` (closed PR) is handled by the 
 ## Jobs
 
 - **🏗️ pr-build** — builds and pushes a preview image for an open PR (e.g. `ghcr.io/<owner>/<repo>/pr/<PR-number>:<branch-sha7>`).
-- **🗑️ pr-delete** — cleans up the preview image when the PR closes.
+- **🗑️ pr-delete** — deletes the preview PACKAGE `<repo>[/<image-name-suffix>]/pr/<PR-number>` when the PR closes (merged or not). Each PR image is its own GHCR package, not a tag. It uses the caller repo's `GITHUB_TOKEN` (the one `pr-build` pushed with, so the repo has Admin on the package); the caller must grant `packages: write`. No secret to set. A 404 is accepted only as "this PR pushed no image"; any other status (e.g. 403: grant the repo Admin on the package) fails the job. Before 2026-11-15 the job ignored `image-name-suffix`, deleted a package that never existed, and passed green. Pre-existing leftovers are pruned by the owner script, not CI (GitHub App tokens and `GITHUB_TOKEN` cannot list org packages).
 - **🧱 ref-build** — builds on every push to the default branch (floating `:main` + immutable `:main-<sha7>` tags).
 - **🏷️ release** — builds and publishes a release on a `v*` tag push, optionally mirroring to Docker Hub.
 - **📝 github-release** — updates the GitHub Release notes with the verified image/digest/attestation details.
