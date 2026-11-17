@@ -18,6 +18,7 @@ It replaced two copies of the same flow — `planeodev/planeo-infra`'s `_gitops-
 - [`verdicts`](capabilities/verdicts.md) — every live verdict, its emoji, whether it passes, and the no-op policy + escape hatch.
 - [`multi-source-helm-template`](capabilities/multi-source-helm-template.md) — how an Application with `spec.sources[]` (OCI/HTTP chart + `$values` + git path) gets a real rendered diff.
 - [`agent-verdict`](capabilities/agent-verdict.md) — `gate.json` (`planeo.dev/gitops-gate/v1`): one decision per unit and one gate verdict for **agents** (the Principal Engineer, the DevSecOps specialist) — read it before deciding; a `not_verified` entry means the live diff did not run.
+- [`image-pullability`](capabilities/image-pullability.md) — **Proposed** (INTEGRATE-63): verify every rendered image with the **cluster's own pull credential** (Vault, via the pod/SA pull secret → ExternalSecret chain) before merge; `image-pullability.json` for agents.
 - [`prerequisites`](capabilities/prerequisites.md) — Vault (GitHub OIDC), tailnet, AWS, repo variables/secrets, the GitHub Environments and the required-status names.
 
 ## How it reads
