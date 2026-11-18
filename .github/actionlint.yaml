@@ -11,6 +11,10 @@ paths:
   .github/workflows/scripted-phase.yaml:
     ignore:
       - 'property "(job_)?workflow_sha" is not defined in object type'
+  # engram-analyzer-conformance.yaml (devsecops-engram-analyzer) checks out actions/engram/analyzer-conformance the same way.
+  .github/workflows/engram-analyzer-conformance.yaml:
+    ignore:
+      - 'property "(job_)?workflow_sha" is not defined in object type'
   # docker-image-security.yaml (devsecops-image-security) checks out actions/docker/image-security the same way.
   .github/workflows/docker-image-security.yaml:
     ignore:

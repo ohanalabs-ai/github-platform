@@ -1,0 +1,142 @@
+# 🧩 engram-analyzer-conformance — the one gate every Engram analyzer IMAGE passes (contract engram-analyzer/v1,
+# okf/analyzer-contract-v1.md in ohanalabs-ai/vionix-codegraph-analyzer). Runs right after the image is built
+# (`docker-multiarch-cicd.yaml` → `image_ref`), on the image by digest, in a credential-less job.
+#
+#   static  final base is Alpine (/etc/os-release) · the Dockerfile's final FROM is alpine:<tag>@sha256:… · image
+#           USER non-root · exec-form absolute ENTRYPOINT (= manifest `entrypoint`) · /engram/analyzer.yaml present
+#           and byte-identical to the source manifest · label dev.rekorda.engram.analyzer.manifest-digest = its
+#           sha256 · busybox mkdir / tar --no-same-owner --no-same-permissions / chmod work as uid 65532
+#   cli     docker run --network none --read-only --cap-drop ALL --user 65532:65532 -v <fixture>:/repo:ro
+#           -e REPO_NODE_ID -e REPO_SHA → exactly one schema-valid sub-graph on stdout, metadata.analyzer = manifest
+#           name, exit 0|1 · the same with the tree at another path (REPO_ROOT) and cwd / · no REPO_NODE_ID → exit 2
+#   grpc    (manifest `interface: grpc` = registry `service: true`) the static checks, then the service starts in the
+#           same sandbox and listens on `grpc.port` (contract §2: every row except stdout/exit codes)
+#
+# Enforcement is per analyzer: `enforcement-file` (in the caller's checkout) maps analyzer name → "enforce" |
+# "report". Report-only analyzers get the full table in the summary and a warning; an enforced one fails the job.
+# All logic is TypeScript (actions/engram/analyzer-conformance/*.ts, Node built-ins only) run by actions/github-script.
+name: 🧩 engram-analyzer-conformance
+run-name: 🧩 engram analyzer conformance gate for ${{ inputs.analyzer || inputs.image }}
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: >-
+          The analyzer image, repo@sha256:… (the build's `image_ref`). Empty = nothing was built in this run (e.g. a
+          closed PR): the gate is skipped and reports `skipped`.
+        type: string
+        required: true
+      analyzer:
+        description: Analyzer name (registry id); used for the enforcement lookup and when the image carries no manifest
+        type: string
+        required: true
+      fixture:
+        description: Fixture repo tree in the caller's checkout, mounted read-only at /repo (e.g. providers/<id>/testdata)
+        type: string
+        required: true
+      manifest:
+        description: The source engram-analyzer.yaml in the caller's checkout (compared byte-for-byte with /engram/analyzer.yaml)
+        type: string
+        default: ""
+      dockerfile:
+        description: The analyzer's Dockerfile in the caller's checkout (final FROM must be alpine:<tag>@sha256:…)
+        type: string
+        default: ""
+      schema:
+        description: Sub-graph JSON Schema in the caller's checkout
+        type: string
+        default: schema/subgraph.schema.json
+      enforcement-file:
+        description: JSON {"analyzers":{"<name>":"enforce"|"report"}} in the caller's checkout; absent name = report
+        type: string
+        default: .github/analyzer-conformance.json
+      mode:
+        description: "Override the enforcement file: enforce | report | empty (use the file)"
+        type: string
+        default: ""
+      profile:
+        description: "cli | grpc | empty (from the manifest's `interface`)"
+        type: string
+        default: ""
+      inputs-dir:
+        description: >-
+          A directory in the caller's checkout staged read-only at /in (contract §7 `consumes`, e.g. a build tier's
+          preflight decision.json bound to the gate's fixture sha). The manifest's `env.set` is always applied.
+        type: string
+        default: ""
+      env:
+        description: Extra KEY=VALUE lines for the contract runs (never REPO_NODE_ID / REPO_SHA / REPO_ROOT, never a secret)
+        type: string
+        default: ""
+      platform:
+        type: string
+        default: linux/amd64
+      timeout-seconds:
+        description: Ceiling per contract run (the manifest's `timeout` lowers it, never raises it)
+        type: number
+        default: 600
+      github-actions-runner:
+        type: string
+        default: ubuntu-latest
+      github-job-timeout-minutes:
+        type: number
+        default: 30
+    outputs:
+      status:
+        description: "pass | fail (enforced) | report-fail (report-only) | skipped"
+        value: ${{ jobs.conformance.outputs.status || 'skipped' }}
+      report:
+        description: The JSON report (checks with status + detail)
+        value: ${{ jobs.conformance.outputs.report }}
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  conformance:
+    name: 🧩 conformance
+    if: inputs.image != ''
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: ${{ inputs.github-job-timeout-minutes }}
+    outputs:
+      status: ${{ steps.gate.outputs.status }}
+      report: ${{ steps.gate.outputs.report }}
+    steps:
+      - name: 📥 Checkout the caller (fixture, manifest, Dockerfile, schema, enforcement list)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: 📥 Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .engram-conformance
+          sparse-checkout: actions/engram/analyzer-conformance
+          persist-credentials: false
+
+      - name: 🧩 Conformance gate (engram-analyzer/v1)
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ inputs.image }}
+          ANALYZER: ${{ inputs.analyzer }}
+          FIXTURE: ${{ inputs.fixture }}
+          MANIFEST: ${{ inputs.manifest }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          SCHEMA: ${{ inputs.schema }}
+          ENFORCEMENT_FILE: ${{ inputs.enforcement-file }}
+          MODE: ${{ inputs.mode }}
+          PROFILE: ${{ inputs.profile }}
+          PLATFORM: ${{ inputs.platform }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+          INPUTS_DIR: ${{ inputs.inputs-dir }}
+          EXTRA_ENV: ${{ inputs.env }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.engram-conformance/actions/engram/analyzer-conformance/gate.ts`);
+            await run({ core, exec, github, context });
