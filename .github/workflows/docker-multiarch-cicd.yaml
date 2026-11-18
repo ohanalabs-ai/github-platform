@@ -293,10 +293,15 @@ jobs:
       - name: Compute vars
         id: vars
         shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "pr=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           echo "full_sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          # On pull_request, GITHUB_SHA is GitHub's test MERGE commit; consumers that only know the PR head
+          # (e.g. the Argo CD ApplicationSet PullRequest generator, {{head_sha}}) need the head SHA tag too.
+          echo "head_sha=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
           # Optional monorepo suffix: ghcr.io/<owner>/<repo>[/<suffix>]
           SUFFIX="$(echo '${{ inputs.image-name-suffix }}' | tr '[:upper:]' '[:lower:]' | sed 's#^/*##; s#/*$##')"
           BASE="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
@@ -368,6 +373,7 @@ jobs:
             ${{ steps.compose-metadata.outputs.target-service }}.context=${{ inputs.docker-compose-context }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.full_sha }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.short_sha }}
+            ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:head-${{ steps.vars.outputs.head_sha }}
             ${{ steps.compose-metadata.outputs.target-service }}.cache-from=type=gha,scope=${{ steps.compose-metadata.outputs.target-service }}
             ${{ steps.compose-metadata.outputs.target-service }}.cache-to=type=gha,mode=max,scope=${{ steps.compose-metadata.outputs.target-service }}
 
@@ -472,6 +478,7 @@ jobs:
             echo '```';
             echo "${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.full_sha }}";
             echo "${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.short_sha }}";
+            echo "${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:head-${{ steps.vars.outputs.head_sha }}";
             echo '```';
             echo "Labels:";
             echo '```';
@@ -488,6 +495,7 @@ jobs:
           TAGS: |
             ${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.full_sha }}
             ${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.short_sha }}
+            ${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:head-${{ steps.vars.outputs.head_sha }}
           LABELS: ${{ steps.meta.outputs.labels }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SHORT_SHA: ${{ steps.vars.outputs.short_sha }}
