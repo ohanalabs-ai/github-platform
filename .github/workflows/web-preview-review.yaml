@@ -1,0 +1,127 @@
+# 🔭 web-preview-review — the human VISUAL LGTM gate for a per-PR web preview (product devsecops-web).
+#
+#   🔎 preview ready   waits until the PR's preview image exists in the registry (the tag the GitOps preview deploys — e.g.
+#                      ghcr.io/<org>/<repo>/pr/<N>:head-<head sha>), optionally probes the preview URL (only from a runner that can
+#                      reach it, e.g. on the tailnet), builds a "what to verify visually" checklist from the PR's changed files and
+#                      the caller's rules file, and publishes it to the RUN SUMMARY, a job output and ONE sticky PR comment.
+#   👀 visual review   runs in the caller's Environment (`environment` input) with `url` = the preview, so the PR shows
+#                      "Deployed to <environment> → View deployment" and the run pauses on GitHub's "Review deployments" button.
+#                      That dialog cannot show custom text: the checklist is on the same run page (summary) and is re-printed in
+#                      this job's summary once a required reviewer approves. Approving = "a visual LGTM of the preview".
+#
+# The Environment is the caller's, created ONCE by a repo admin (no API here creates or edits it):
+#   - name = `environment` (one FIXED name, e.g. website-preview — never a per-PR name);
+#   - protection rule "Required reviewers" = the owner/team that gives the visual LGTM;
+#   - deployment branches = "No restriction" (deployment_branch_policy: null): a pull_request run's ref is refs/pull/<N>/merge,
+#     so any branch rule silently rejects the job before a runner starts (products/devsecops-terraform/README.md §Environment).
+# Every logic step is TypeScript run by actions/github-script (no npm dependencies): actions/web/preview-review/{prepare,gate}.ts,
+# pure logic + tests in checklist.ts / checklist.test.ts. Usage: products/devsecops-web/README.md.
+name: 🔭 web-preview-review
+
+on:
+  workflow_call:
+    inputs:
+      url:
+        description: The preview URL (e.g. https://landing-pr16.platform.planeo.dev) — the Environment's deployment URL.
+        type: string
+        required: true
+      image:
+        description: The image the preview runs, <registry>/<name>:<tag> (e.g. ghcr.io/planeodev/website/pr/16:head-<head sha>).
+        type: string
+        required: true
+      environment:
+        description: The caller's GitHub Environment holding the required reviewers (a FIXED name, e.g. website-preview).
+        type: string
+        default: website-preview
+      rules-file:
+        description: Path (in the caller repo) of the checklist rules JSON — {title, rules:[{name, globs[], items[]}], generic[]}.
+        type: string
+        default: .github/preview-checklist.json
+      wait-minutes:
+        description: How long 🔎 preview ready waits for the image (and the URL, when probe-url) before failing.
+        type: number
+        default: 25
+      probe-url:
+        description: Also wait until the URL answers (< 500; a 302 to SSO counts). Only from a runner that can reach the preview.
+        type: boolean
+        default: false
+      github-actions-runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      checklist:
+        description: The checklist markdown (also in the run summary and the sticky PR comment).
+        value: ${{ jobs.ready.outputs.checklist }}
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: write
+
+jobs:
+  ready:
+    name: 🔎 preview ready
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 35 # > the default wait-minutes (25); a longer wait needs a caller-side timeout too
+    outputs:
+      checklist: ${{ steps.prepare.outputs.checklist }}
+    steps:
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .web-preview-review
+          sparse-checkout: actions/web/preview-review
+          persist-credentials: false
+      - name: Checkout the caller's checklist rules
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: .caller
+          sparse-checkout: ${{ inputs.rules-file }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Wait for the preview image, build the checklist, publish summary + sticky comment
+        id: prepare
+        env:
+          URL: ${{ inputs.url }}
+          IMAGE: ${{ inputs.image }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          RULES_FILE: .caller/${{ inputs.rules-file }}
+          WAIT_MINUTES: ${{ inputs.wait-minutes }}
+          PROBE_URL: ${{ inputs.probe-url }}
+          GH_TOKEN: ${{ github.token }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-preview-review/actions/web/preview-review/prepare.ts`);
+            await run({ core, exec, github, context });
+
+  review:
+    name: 👀 visual review
+    needs: ready
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 5
+    # The gate: a required reviewer of this Environment approves = the visual LGTM. `url` makes the PR show "View deployment".
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ inputs.url }}
+    steps:
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .web-preview-review
+          sparse-checkout: actions/web/preview-review
+          persist-credentials: false
+      - name: Record the visual LGTM (checklist + approver in the job summary)
+        env:
+          CHECKLIST: ${{ needs.ready.outputs.checklist }}
+          URL: ${{ inputs.url }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-preview-review/actions/web/preview-review/gate.ts`);
+            await run({ core, exec, github, context });
