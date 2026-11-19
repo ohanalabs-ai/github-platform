@@ -26,6 +26,30 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+      free-disk-space:
+        description: >-
+          Opt-in: before the build, delete the GitHub-hosted runner's preinstalled toolchains this pipeline never
+          uses (.NET, Android SDK, Haskell, CodeQL bundle, Swift, Boost, PowerShell) and prune cached Docker images —
+          about 20-30 GB on ubuntu-latest. For images too large for the private-repo runner's disk (symptom: ENOSPC
+          inside a RUN). Off by default: it adds about 1-2 minutes. No effect on a self-hosted runner without these paths.
+        type: boolean
+        default: false
+        required: false
+      docker-review:
+        description: >-
+          Opt-in: on pull requests, run the cloud-native Docker reviewer (ohanalabs-ai/actions/cloud-native/reviewer-docker)
+          on the PR's Dockerfile / compose / .dockerignore changes, with the repo's Docker BUILD GRAPH (a Mermaid diagram of
+          every Dockerfile stage and the compose services that target them, computed from the PR head, not from the diff)
+          in its prompt and in the run summary. Needs the `anthropic-api-key` secret for the review; without it only the
+          graph is published.
+        type: boolean
+        default: false
+        required: false
+      docker-review-models:
+        description: Comma-separated Anthropic models the reviewer tries in order.
+        type: string
+        default: claude-sonnet-5-5,claude-opus-5-5,claude-haiku-5-5
+        required: false
       github-job-timeout-minutes:
         description: Allow more minutes to run, using 10 as the default timeout. Increase if required
         type: number
@@ -122,6 +146,11 @@ on:
         default: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml
 
 
+    secrets:
+      anthropic-api-key:
+        description: Anthropic API key for the `docker-review` job (optional; without it the job publishes only the build graph).
+        required: false
+
     outputs:
       image_tag:
         description: Full image reference produced by ref-build (e.g. ghcr.io/org/repo/suffix:main-abc1234). Empty when ref-build was skipped.
@@ -215,6 +244,18 @@ jobs:
       image_digest: ${{ steps.pr_digest.outputs.digest }}
       image_ref: ${{ steps.pr_digest.outputs.digest && format('{0}@{1}', steps.pr_digest.outputs.image_base, steps.pr_digest.outputs.digest) || '' }}
     steps:
+      - name: 🧹 Free disk space (inputs.free-disk-space)
+        if: inputs.free-disk-space
+        shell: bash
+        run: |
+          echo "### 🧹 Free disk space" >> "$GITHUB_STEP_SUMMARY"
+          echo "Before: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          echo "After: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -605,6 +646,18 @@ jobs:
       comment_enabled: ${{ steps.build_vars.outputs.comment_enabled }}
       image_suffix: ${{ steps.build_vars.outputs.image_suffix }}
     steps:
+      - name: 🧹 Free disk space (inputs.free-disk-space)
+        if: inputs.free-disk-space
+        shell: bash
+        run: |
+          echo "### 🧹 Free disk space" >> "$GITHUB_STEP_SUMMARY"
+          echo "Before: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          echo "After: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          df -h /
+
       - name: Checkout effective branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -862,6 +915,18 @@ jobs:
       builder_id: ${{ steps.build_identity.outputs.builder-id }}
       report_title: SLSA verification (release build)
     steps:
+      - name: 🧹 Free disk space (inputs.free-disk-space)
+        if: inputs.free-disk-space
+        shell: bash
+        run: |
+          echo "### 🧹 Free disk space" >> "$GITHUB_STEP_SUMMARY"
+          echo "Before: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          echo "After: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -1548,3 +1613,51 @@ jobs:
               `Published verified release ${tag}: ` +
               `${process.env.RELEASE_URL || tagUrl}`
             );
+
+  # 🐳 Cloud-native Docker review + the computed build graph (inputs.docker-review). Read-only on the repo; its only
+  # write is the reviewer's sticky PR comment. Never blocks the build: a reviewer failure is reported, not fatal.
+  docker-review:
+    name: 🐳 docker-review
+    if: inputs.docker-review && github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout the PR head (Dockerfiles + compose, read-only)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Load the build-graph helper (this reusable's own commit)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .docker-build-graph
+          sparse-checkout: actions/docker/build-graph
+          persist-credentials: false
+
+      - name: 🗺️ build graph (Dockerfile stages + compose services)
+        id: graph
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          BUILD_GRAPH_ROOT: ${{ github.workspace }}
+          BUILD_GRAPH_COMPOSE_FILE: ${{ inputs.docker-compose-file-name }}
+          HAS_REVIEW_KEY: ${{ secrets.anthropic-api-key != '' }}
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.docker-build-graph/actions/docker/build-graph/graph.ts`);
+            await run({ core });
+            core.setOutput('review', process.env.HAS_REVIEW_KEY === 'true' ? 'true' : 'false');
+            if (process.env.HAS_REVIEW_KEY !== 'true') core.notice('docker-review: no anthropic-api-key secret was passed; published the build graph only.');
+
+      - name: 🐳 cloud-native Docker review
+        if: steps.graph.outputs.review == 'true'
+        uses: ohanalabs-ai/actions/cloud-native/reviewer-docker@main
+        with:
+          anthropic-api-key: ${{ secrets.anthropic-api-key }}
+          anthropic-models: ${{ inputs.docker-review-models }}
+          include-ci-signal: "false"
+          extra-prompt: ${{ steps.graph.outputs.prompt }}

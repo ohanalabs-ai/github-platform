@@ -36,6 +36,9 @@ Always reference `@main` — this is an internal, org-owned workflow repo, so ca
 |---|---|---|
 | `github-actions-runner` | `ubuntu-latest` | Runner for every job |
 | `github-job-timeout-minutes` | `10` | Per-job timeout; increase for slow multi-arch builds |
+| `free-disk-space` | `false` | Before building (pr/ref/release builds), delete the hosted runner's unused preinstalled toolchains (.NET, Android, Haskell, CodeQL, Swift, Boost, PowerShell) and prune cached images: about 20-30 GB more disk. Use it when a large image fails with `ENOSPC` on a private repo's runner. Adds about 1-2 minutes and writes before/after free space to the run summary |
+| `docker-review` | `false` | On PRs, a `🐳 docker-review` job: computes the repo's **Docker build graph** (Mermaid: every Dockerfile stage, `FROM`/`COPY --from`/`RUN --mount from=` edges, the last stage highlighted as the runtime, compose services linked to their `target`) from the PR head and publishes it to the run summary. With the `anthropic-api-key` secret, it also runs `ohanalabs-ai/actions/cloud-native/reviewer-docker` with that graph in its prompt (sticky PR comment `## 🐳 Docker Build Review`). Never blocks the build |
+| `docker-review-models` | `claude-sonnet-5-5,claude-opus-5-5,claude-haiku-5-5` | Models the reviewer tries in order |
 | `registry` | `ghcr.io` | Default registry for all builds |
 | `platforms` | `linux/amd64,linux/arm64` | Platforms passed to `docker buildx bake` |
 | `docker-compose-context` | `.` | **Overrides the bake target's build context** (`<target>.context=<this>`), replacing the service's `build.context` from the compose file. In a monorepo set it to exactly that service's `build.context` (e.g. `./src/frontend`) — the default `.` makes the build look for `./Dockerfile` at the repo root |
