@@ -26,6 +26,15 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+      free-disk-space:
+        description: >-
+          Opt-in: before the build, delete the GitHub-hosted runner's preinstalled toolchains this pipeline never
+          uses (.NET, Android SDK, Haskell, CodeQL bundle, Swift, Boost, PowerShell) and prune cached Docker images —
+          about 20-30 GB on ubuntu-latest. For images too large for the private-repo runner's disk (symptom: ENOSPC
+          inside a RUN). Off by default: it adds about 1-2 minutes. No effect on a self-hosted runner without these paths.
+        type: boolean
+        default: false
+        required: false
       github-job-timeout-minutes:
         description: Allow more minutes to run, using 10 as the default timeout. Increase if required
         type: number
@@ -215,6 +224,18 @@ jobs:
       image_digest: ${{ steps.pr_digest.outputs.digest }}
       image_ref: ${{ steps.pr_digest.outputs.digest && format('{0}@{1}', steps.pr_digest.outputs.image_base, steps.pr_digest.outputs.digest) || '' }}
     steps:
+      - name: 🧹 Free disk space (inputs.free-disk-space)
+        if: inputs.free-disk-space
+        shell: bash
+        run: |
+          echo "### 🧹 Free disk space" >> "$GITHUB_STEP_SUMMARY"
+          echo "Before: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          echo "After: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -605,6 +626,18 @@ jobs:
       comment_enabled: ${{ steps.build_vars.outputs.comment_enabled }}
       image_suffix: ${{ steps.build_vars.outputs.image_suffix }}
     steps:
+      - name: 🧹 Free disk space (inputs.free-disk-space)
+        if: inputs.free-disk-space
+        shell: bash
+        run: |
+          echo "### 🧹 Free disk space" >> "$GITHUB_STEP_SUMMARY"
+          echo "Before: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          echo "After: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          df -h /
+
       - name: Checkout effective branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -862,6 +895,18 @@ jobs:
       builder_id: ${{ steps.build_identity.outputs.builder-id }}
       report_title: SLSA verification (release build)
     steps:
+      - name: 🧹 Free disk space (inputs.free-disk-space)
+        if: inputs.free-disk-space
+        shell: bash
+        run: |
+          echo "### 🧹 Free disk space" >> "$GITHUB_STEP_SUMMARY"
+          echo "Before: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          echo "After: $(df -h / | awk 'NR==2{print $4" free of "$2}')" >> "$GITHUB_STEP_SUMMARY"
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
