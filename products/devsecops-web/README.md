@@ -70,3 +70,63 @@ TypeScript run by `actions/github-script`, no npm dependencies, in [`actions/web
 - `checklist.ts` holds the pure glob, rules and markdown logic, tested by `checklist.test.ts` through `actions-typescript-selftest.yaml`;
 - `prepare.ts` runs 🔎;
 - `gate.ts` runs 👀.
+
+---
+
+# 📸 web-pr-rundown
+
+Reusable workflow: [`web-pr-rundown.yaml`](../../.github/workflows/web-pr-rundown.yaml). It puts **screenshots and checks of a web PR in the PR itself**, so
+designers, frontend/backend engineers and agents can review without opening the preview. It needs no preview URL: the job runs the PR's image
+(and a baseline image) on the runner's localhost and drives them with Playwright.
+
+| What | How |
+|---|---|
+| Pages | every page reachable from `/` (BFS over internal links, `max-pages`), or the `pages` list |
+| Screenshots | full page at each `viewports` width (default 390 / 768 / 1440); animations frozen, every video painted as its poster (a frame depends on load timing), reveals scrolled through, and a second capture of the PR page masks whatever still moves on its own — so the same image diffs at 0 % |
+| Before / after | pixel diff vs the baseline = the newest `<base-image-repo>:<base branch>-<sha7>` among the base branch's last 15 commits; per view and per top-level `<section>` (paired by id → aria-label → heading); only changed sections are cropped |
+| Videos | the media URL answers; a muted `play()` really plays; `autoplay` videos play by themselves and are muted |
+| Problems | console errors, failed requests (network failure or HTTP ≥ 400), broken internal links / missing anchors, the caller's deny-list over the rendered DOM (text, alt/title/aria-label/placeholder, meta, title) and every text response |
+| Output | ONE sticky PR comment (images inline), the run summary, the artifact `pr-rundown-<N>` with `rundown.json` (schema `web-pr-rundown/v1`, [`rundown.ts`](../../actions/web/pr-rundown/rundown.ts)) + every screenshot |
+
+Deny-list findings are reported as **the deny-list line number + a selector**, never the matched text; console and request text is redacted
+(█) before it is written anywhere.
+
+## Caller
+
+```yaml
+  rundown:
+    needs: docker # the job that pushes the PR image
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ohanalabs-ai/github-platform/.github/workflows/web-pr-rundown.yaml@<sha> # main
+    permissions: { contents: write, packages: read, pull-requests: write }
+    with:
+      image: ghcr.io/<org>/<repo>/pr/${{ github.event.pull_request.number }}:head-${{ github.event.pull_request.head.sha }}
+      base-image-repo: ghcr.io/<org>/<repo>
+      container-port: 3000
+```
+
+Run it on `closed` too (`types: [opened, synchronize, reopened, closed]`): the `🧹 prune` job deletes the PR's screenshots branch.
+
+## Where the images live
+
+The REST API cannot attach an image to a comment. The screenshots are committed to a per-PR orphan branch **`pr-rundown-<N>`**
+(`assets-branch-prefix`) as one **parentless** commit, force-rewritten on every run and deleted when the PR closes: the repo never keeps their
+history, and two PRs never write the same ref. The comment links `https://github.com/<owner>/<repo>/blob/pr-rundown-<N>/shots/…?raw=true`, which
+renders for anyone who can read the repo, private repos included. If the repo protects branches by a wildcard rule that matches
+`pr-rundown-*`, exempt that pattern (the workflow's token must be able to force-push it).
+
+## Failing the job
+
+`fail-on` (default `denylist,video`) chooses which findings fail the job; the comment always shows every finding. Add `links`, `console` or
+`requests` to make those blocking, or pass `''` to report only.
+
+## Code
+
+- `actions/web/pr-rundown/rundown.ts`: the pure part (schema + validation, deny-list parse/scan/redact, section pairing, branch/URL layout,
+  failure policy, the comment). Tests: `rundown.test.ts` (node:test, run by `actions-typescript-selftest.yaml`).
+- `resolve.ts` (wait for the image, find the baseline), `run.ts` (start both images, run the capture), `publish.ts` (screenshots branch + sticky
+  comment + summary), `prune.ts` (on close): TypeScript via `actions/github-script`, no npm dependencies.
+- `capture/capture.ts`: the capture tool. It runs **inside** `mcr.microsoft.com/playwright` (pinned by digest in the workflow) with `playwright`
+  as its only dependency, locked in `capture/package-lock.json` at the image's exact version (the tools-image pattern). Bump both together.
+- Run it locally against any two servers:
+  `docker run --rm --network host -v $PWD/actions/web/pr-rundown:/a -v $PWD/out:/out -w /a/capture -e HEAD_URL=http://127.0.0.1:3300 -e BASE_URL=http://127.0.0.1:3301 -e OUT=/out <playwright image> sh -c 'npm ci && node capture.ts'`.
