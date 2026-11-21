@@ -82,7 +82,7 @@ designers, frontend/backend engineers and agents can review without opening the 
 | What | How |
 |---|---|
 | Pages | every page reachable from `/` (BFS over internal links, `max-pages`), or the `pages` list |
-| Screenshots | full page at each `viewports` width (default 390 / 768 / 1440); animations frozen, videos parked on frame 0, reveals scrolled through — so the same image diffs at 0 % |
+| Screenshots | full page at each `viewports` width (default 390 / 768 / 1440); animations frozen, every video painted as its poster (a frame depends on load timing), reveals scrolled through, and a second capture of the PR page masks whatever still moves on its own — so the same image diffs at 0 % |
 | Before / after | pixel diff vs the baseline = the newest `<base-image-repo>:<base branch>-<sha7>` among the base branch's last 15 commits; per view and per top-level `<section>` (paired by id → aria-label → heading); only changed sections are cropped |
 | Videos | the media URL answers; a muted `play()` really plays; `autoplay` videos play by themselves and are muted |
 | Problems | console errors, failed requests (network failure or HTTP ≥ 400), broken internal links / missing anchors, the caller's deny-list over the rendered DOM (text, alt/title/aria-label/placeholder, meta, title) and every text response |

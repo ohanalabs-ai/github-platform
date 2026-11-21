@@ -1,7 +1,8 @@
 // web-pr-rundown capture — runs INSIDE the pinned mcr.microsoft.com/playwright image (its Chromium), with `playwright` as the
 // one npm dependency (capture/package-lock.json, the image's exact version). It drives two local servers — the PR's image (HEAD_URL)
 // and the baseline image (BASE_URL, optional) — and writes OUT/rundown.json + OUT/shots/*.jpg:
-//   - every page reachable from "/" (BFS over internal <a href>, ≤ MAX_PAGES), at each VIEWPORTS width, full-page;
+//   - every page reachable from "/" (BFS over internal <a href>, ≤ MAX_PAGES), at each VIEWPORTS width, full-page (videos painted
+//     as their poster, animations frozen, a second capture masks whatever still moves);
 //   - a pixel diff head vs base per view and per <section> (in a canvas, so no image library), crops of the changed sections;
 //   - videos: the media URL answers, a muted play() actually plays, autoplay videos play on their own and are muted;
 //   - console errors, failed requests (≥ 400 or network failure), broken internal links, deny-list hits in the rendered DOM and
@@ -37,25 +38,26 @@ async function open(b: Browser, url: string, width: number) {
   return { ctx, page, status: res?.status() ?? 0 };
 }
 
-/** Scroll through (reveals, lazy media), freeze animations, park every video on frame 0, then measure the sections. */
+/** Scroll through (reveals, lazy media), freeze animations, paint every video as its poster, then measure the sections. */
 async function settle(page: Page) {
   await page.addStyleTag({ content: FREEZE });
   await page.evaluate(async () => {
     const step = window.innerHeight;
     for (let y = 0; y < document.documentElement.scrollHeight; y += step) { window.scrollTo(0, y); await new Promise((r) => setTimeout(r, 80)); }
     window.scrollTo(0, 0);
-    // videos that load by themselves (autoplay / preload ≠ none) must have a frame before they are parked, or one capture shows a
-    // black box and the other the frame — a false "changed"
-    await Promise.all([...document.querySelectorAll("video")].filter((v) => (v.autoplay || v.preload !== "none") && (v.currentSrc || v.src)).map((v) => new Promise<void>((done) => {
-      if (v.readyState >= 2) return done();
-      const t = setTimeout(done, 15_000); v.addEventListener("loadeddata", () => { clearTimeout(t); done(); }, { once: true });
-      if (v.preload === "none") v.load();
-    })));
-    await Promise.all([...document.querySelectorAll("video")].map((v) => new Promise<void>((done) => {
+    // Every <video> is painted as its POSTER, by CSS: a video's visible frame depends on load timing and compositing (a black box
+    // on one capture, a frame on the other), so it can never diff stably. The element keeps its box; its picture is pushed out of
+    // the box (object-position) and the poster is its background (cover) — a video without a poster is a grey box. Only the
+    // element's style changes (no node swap: React owns these nodes). A changed poster still shows as a change; playback is checked
+    // separately (the video check, on a fresh page).
+    const posters: Promise<unknown>[] = [];
+    for (const v of [...document.querySelectorAll("video")]) {
       v.pause();
-      if (v.readyState === 0 || v.currentTime === 0) return done();
-      const t = setTimeout(done, 2000); v.addEventListener("seeked", () => { clearTimeout(t); done(); }, { once: true }); v.currentTime = 0;
-    })));
+      v.style.setProperty("object-position", "-100000px -100000px", "important");
+      v.style.setProperty("background", v.poster ? `#000 url("${v.poster}") center / cover no-repeat` : "#9ca3af", "important");
+      if (v.poster) posters.push(new Promise((done) => { const i = new Image(); i.onload = i.onerror = done; i.src = v.poster; setTimeout(done, 10_000); }));
+    }
+    await Promise.all(posters);
     await document.fonts.ready;
   });
   await page.waitForTimeout(1000); // scroll-linked / smoothed effects settle at the top
