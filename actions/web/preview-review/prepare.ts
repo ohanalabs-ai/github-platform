@@ -24,7 +24,7 @@ export function splitImage(image: string): { registry: string; name: string; tag
   return { registry: m[1], name: m[2], tag: m[3] };
 }
 
-async function imageExists(image: string, token: string): Promise<boolean> {
+export async function imageExists(image: string, token: string): Promise<boolean> {
   const { registry, name, tag } = splitImage(image);
   const auth = await fetch(`https://${registry}/token?service=${registry}&scope=repository:${name}:pull`, {
     headers: { Authorization: `Basic ${Buffer.from(`x:${token}`).toString("base64")}` },
