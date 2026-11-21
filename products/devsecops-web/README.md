@@ -5,6 +5,7 @@ Reusable workflow: [`web-preview-review.yaml`](../../.github/workflows/web-previ
 | Job | What it does |
 |---|---|
 | **🔎 preview ready** | Waits until the preview **image** exists in the registry, e.g. `ghcr.io/<org>/<repo>/pr/<N>:head-<head sha>` (the [`docker-multiarch-cicd.yaml`](../devsecops-docker/README.md) head tag). With `probe-url: true` it also waits for the URL; use that only on a runner that can reach the preview, such as a tailnet node. It then builds a **"what to verify visually"** checklist from the PR's changed files and your rules file, and publishes it to the **run summary**, the `checklist` output and **one sticky PR comment** (edited in place). |
+| **⏳ preview deployed** (opt-in) | With `deploy-status-context` set (e.g. `preview/deployed`), waits up to `deploy-wait-minutes` (20) until that **commit status is `success` on the PR head sha**. The GitOps side sets it once the preview runs this commit and passed its in-cluster smoke test, e.g. Argo CD Notifications after a PostSync hook. A `failure` is not final, because Argo CD retries the sync; on timeout the job names the last state and `argocd-app`. The runner never reaches the preview. Needs `statuses: read`. |
 | **👀 visual review** | Runs in **your Environment** (`environment`, default `website-preview`) with `url` = the preview. The PR shows **"Deployed to website-preview → View deployment"**, and the run pauses on GitHub's **Review deployments** button. Approving means **"a visual LGTM of the preview"**. That dialog cannot show custom text, so the checklist sits on the same run page (summary) and is re-printed with the approver in this job's summary. |
 
 ## Caller
@@ -15,12 +16,14 @@ Reusable workflow: [`web-preview-review.yaml`](../../.github/workflows/web-previ
     needs: docker # the build that pushes pr/<N>:head-<sha>
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     uses: ohanalabs-ai/github-platform/.github/workflows/web-preview-review.yaml@<sha> # main
-    permissions: { contents: read, packages: read, pull-requests: write }
+    permissions: { contents: read, packages: read, pull-requests: write, statuses: read }
     with:
       url: https://landing-pr${{ github.event.pull_request.number }}.platform.planeo.dev
       image: ghcr.io/${{ github.repository }}/pr/${{ github.event.pull_request.number }}:head-${{ github.event.pull_request.head.sha }}
       environment: website-preview
       rules-file: .github/preview-checklist.json
+      deploy-status-context: preview/deployed # opt-in ⏳; needs statuses: read in `permissions`
+      argocd-app: landing-pr-${{ github.event.pull_request.number }}
 ```
 
 The check names are `<caller job id> / 🔎 preview ready` and `<caller job id> / 👀 visual review`, e.g. `preview / 👀 visual review`. To make the LGTM **required for merge**, add that name to the branch protection's required status checks. That is a repo-admin step, not this workflow.
@@ -60,7 +63,7 @@ gh api -X PUT repos/<owner>/<repo>/environments/website-preview \
 
 ## Permissions
 
-`contents: read` (the rules file), `packages: read` (the image check, using `GITHUB_TOKEN`), `pull-requests: write` (the sticky comment). No secrets.
+`contents: read` (the rules file), `packages: read` (the image check, using `GITHUB_TOKEN`), `pull-requests: write` (the sticky comment), `statuses: read` (⏳, only with `deploy-status-context`). No secrets.
 
 Fork PRs: gate the caller job on `head.repo.full_name == github.repository`, as above. Forks get no write token, and their previews are not deployed.
 
@@ -69,6 +72,7 @@ Fork PRs: gate the caller job on `head.repo.full_name == github.repository`, as 
 TypeScript run by `actions/github-script`, no npm dependencies, in [`actions/web/preview-review/`](../../actions/web/preview-review/):
 - `checklist.ts` holds the pure glob, rules and markdown logic, tested by `checklist.test.ts` through `actions-typescript-selftest.yaml`;
 - `prepare.ts` runs 🔎;
+- `deploy-wait.ts` runs ⏳, with its pure logic in `deploy-status.ts`, tested by `deploy-status.test.ts`;
 - `gate.ts` runs 👀.
 
 ---

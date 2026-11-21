@@ -4,6 +4,9 @@
 #                      ghcr.io/<org>/<repo>/pr/<N>:head-<head sha>), optionally probes the preview URL (only from a runner that can
 #                      reach it, e.g. on the tailnet), builds a "what to verify visually" checklist from the PR's changed files and
 #                      the caller's rules file, and publishes it to the RUN SUMMARY, a job output and ONE sticky PR comment.
+#   ⏳ preview deployed (opt-in: `deploy-status-context`) waits until the CLUSTER reports that the preview runs THIS commit and
+#                      passed its in-cluster smoke test: a commit status (default `preview/deployed`) = success on the PR head sha,
+#                      set by the GitOps side (e.g. Argo CD Notifications). The runner never needs to reach the preview.
 #   👀 visual review   runs in the caller's Environment (`environment` input) with `url` = the preview, so the PR shows
 #                      "Deployed to <environment> → View deployment" and the run pauses on GitHub's "Review deployments" button.
 #                      That dialog cannot show custom text: the checklist is on the same run page (summary) and is re-printed in
@@ -45,6 +48,21 @@ on:
         description: Also wait until the URL answers (< 500; a 302 to SSO counts). Only from a runner that can reach the preview.
         type: boolean
         default: false
+      deploy-status-context:
+        description: >-
+          Opt-in ⏳ preview deployed: the commit-status context the GitOps side sets to `success` once the preview runs the PR head sha
+          and passed its smoke test (e.g. preview/deployed from Argo CD Notifications). Empty = skip the job. The caller must grant
+          `statuses: read`.
+        type: string
+        default: ""
+      deploy-wait-minutes:
+        description: How long ⏳ preview deployed waits for that status (a `failure` is not final — Argo CD retries the sync).
+        type: number
+        default: 20
+      argocd-app:
+        description: Optional, for the failure message only — the GitOps Application of this preview (e.g. landing-pr-16).
+        type: string
+        default: ""
       github-actions-runner:
         type: string
         default: ubuntu-latest
@@ -57,6 +75,7 @@ permissions:
   contents: read
   packages: read
   pull-requests: write
+  statuses: read # ⏳ preview deployed (only when deploy-status-context is set)
 
 jobs:
   ready:
@@ -98,9 +117,43 @@ jobs:
             const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-preview-review/actions/web/preview-review/prepare.ts`);
             await run({ core, exec, github, context });
 
+  deployed:
+    name: ⏳ preview deployed
+    needs: ready
+    if: inputs.deploy-status-context != ''
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 40 # > the default deploy-wait-minutes (20)
+    permissions:
+      contents: read
+      statuses: read
+    outputs:
+      url: ${{ steps.wait.outputs.url }}
+    steps:
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .web-preview-review
+          sparse-checkout: actions/web/preview-review
+          persist-credentials: false
+      - name: Wait for the cluster's "deployed + verified" status on the head sha
+        id: wait
+        env:
+          CONTEXT: ${{ inputs.deploy-status-context }}
+          WAIT_MINUTES: ${{ inputs.deploy-wait-minutes }}
+          ARGOCD_APP: ${{ inputs.argocd-app }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-preview-review/actions/web/preview-review/deploy-wait.ts`);
+            await run({ core, exec, github, context });
+
   review:
     name: 👀 visual review
-    needs: ready
+    needs: [ready, deployed]
+    # After ⏳ when it runs; straight after 🔎 when it is skipped (deploy-status-context empty).
+    if: ${{ !cancelled() && needs.ready.result == 'success' && (needs.deployed.result == 'success' || needs.deployed.result == 'skipped') }}
     runs-on: ${{ inputs.github-actions-runner }}
     timeout-minutes: 5
     # The gate: a required reviewer of this Environment approves = the visual LGTM. `url` makes the PR show "View deployment".
