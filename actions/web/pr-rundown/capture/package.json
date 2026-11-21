@@ -1,0 +1,7 @@
+{
+  "name": "web-pr-rundown-capture",
+  "private": true,
+  "description": "The ONE dependency of the capture step: playwright, at the exact version of the pinned mcr.microsoft.com/playwright image (its browsers). Runs only inside that container.",
+  "type": "module",
+  "dependencies": { "playwright": "1.65.1" }
+}

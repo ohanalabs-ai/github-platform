@@ -1,0 +1,205 @@
+# 📸 web-pr-rundown — screenshots + checks of a web PR, in the PR itself (product devsecops-web; next to 🔭 web-preview-review).
+#
+#   📸 rundown   on a PR (opened / synchronize / reopened): waits for the PR's image (e.g. ghcr.io/<org>/<repo>/pr/<N>:head-<sha>),
+#                finds the BASELINE image (the newest `<base-image-repo>:<base branch>-<sha7>` among the base branch's last 15
+#                commits, e.g. ghcr.io/planeodev/website:develop-7f58f02), runs both on the runner's localhost and drives them
+#                with Playwright (the pinned mcr.microsoft.com/playwright image):
+#                  - every page reachable from "/" at each viewport (default 390 / 768 / 1440), full page;
+#                  - a pixel diff per view and per <section> → before/after crops of what changed;
+#                  - videos load and play (autoplay ones by themselves, and muted), console errors, failed requests,
+#                    broken internal links, the caller's deny-list over the rendered DOM and every text response
+#                    (reported as line number + selector only; console/request text is redacted).
+#                Publishes ONE sticky PR comment with the images inline, the run summary, and the artifact
+#                `pr-rundown-<N>` (rundown.json — schema web-pr-rundown/v1, for agents — plus every screenshot).
+#   🧹 prune     on PR close: deletes the PR's screenshots branch.
+# No preview URL, VPN or SSO is involved: the job runs the image itself. Fork PRs are skipped (no write token).
+#
+# Where the images live: the REST API cannot attach images to a comment, so they are committed to a per-PR orphan branch
+# `<assets-branch-prefix><N>` (default pr-rundown-<N>) as ONE parentless commit, rewritten on every run (no history growth, no
+# cross-PR races — only this PR's runs write it) and deleted on close. Comments link github.com/<repo>/blob/<branch>/<file>?raw=true,
+# which renders for anyone who can read the repo (private repos included).
+#
+# Logic: TypeScript via actions/github-script, no npm dependencies (actions/web/pr-rundown/{resolve,run,publish,prune}.ts; pure
+# logic + tests in rundown.ts / rundown.test.ts). The ONE exception is the capture tool itself: capture/capture.ts runs INSIDE the
+# Playwright image with `playwright` as its single dependency, locked in capture/package-lock.json at the image's exact version —
+# the same tool-image pattern as the docker/terraform tools images. Usage: products/devsecops-web/README.md.
+name: 📸 web-pr-rundown
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: The PR's image, <registry>/<name>:<tag> (e.g. ghcr.io/planeodev/website/pr/21:head-<head sha>).
+        type: string
+        required: true
+      base-image-repo:
+        description: The image repo whose `<base branch>-<sha7>` builds are the baseline (e.g. ghcr.io/planeodev/website). '' = no baseline.
+        type: string
+        default: ""
+      base-image:
+        description: Explicit baseline image (overrides base-image-repo).
+        type: string
+        default: ""
+      base-tag-prefix:
+        description: Tag prefix of the baseline builds (default = the PR's base branch, e.g. develop → develop-<sha7>).
+        type: string
+        default: ""
+      container-port:
+        description: The port the image serves HTTP on.
+        type: number
+        default: 3000
+      viewports:
+        description: Comma-separated viewport widths in px.
+        type: string
+        default: "390,768,1440"
+      pages:
+        description: Comma-separated paths to capture. '' = crawl internal links from / (max-pages).
+        type: string
+        default: ""
+      max-pages:
+        type: number
+        default: 20
+      threshold:
+        description: Fraction of differing pixels above which a view / section counts as changed.
+        type: string
+        default: "0.001"
+      denylist-file:
+        description: Path (caller repo) of the deny-list, one case-insensitive regex per line. Missing = no scan (warning).
+        type: string
+        default: contract/vendor/denylist.txt
+      fail-on:
+        description: Which findings fail the job — any of denylist, video, links, console, requests ('' = report only).
+        type: string
+        default: denylist,video
+      assets-branch-prefix:
+        type: string
+        default: pr-rundown-
+      wait-minutes:
+        description: How long to wait for the PR image.
+        type: number
+        default: 25
+      github-actions-runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      comment-url:
+        description: The sticky PR comment with the screenshots.
+        value: ${{ jobs.rundown.outputs.comment-url }}
+
+permissions:
+  contents: write # the per-PR screenshots branch
+  packages: read # pull the PR + baseline images
+  pull-requests: write # the sticky comment
+
+env:
+  # Playwright 1.65.1 (noble), pinned by digest; capture/package-lock.json pins the same playwright version.
+  PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
+
+jobs:
+  rundown:
+    name: 📸 rundown
+    if: >-
+      github.event_name == 'pull_request' && github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 45
+    outputs:
+      comment-url: ${{ steps.publish.outputs.comment_url }}
+    steps:
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .web-pr-rundown
+          sparse-checkout: |
+            actions/web/pr-rundown
+            actions/web/preview-review
+          persist-credentials: false
+      - name: Checkout the caller's deny-list
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: .caller
+          sparse-checkout: ${{ inputs.denylist-file }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Wait for the PR image, find the baseline image
+        id: resolve
+        env:
+          HEAD_IMAGE: ${{ inputs.image }}
+          BASE_IMAGE: ${{ inputs.base-image }}
+          BASE_IMAGE_REPO: ${{ inputs.base-image-repo }}
+          BASE_TAG_PREFIX: ${{ inputs.base-tag-prefix }}
+          WAIT_MINUTES: ${{ inputs.wait-minutes }}
+          GH_TOKEN: ${{ github.token }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-pr-rundown/actions/web/pr-rundown/resolve.ts`);
+            await run({ core, exec, github, context });
+      - name: Run both images on localhost, capture with Playwright
+        env:
+          HEAD_IMAGE: ${{ steps.resolve.outputs.head_image }}
+          HEAD_LABEL: ${{ steps.resolve.outputs.head_label }}
+          BASE_IMAGE: ${{ steps.resolve.outputs.base_image }}
+          BASE_LABEL: ${{ steps.resolve.outputs.base_label }}
+          CONTAINER_PORT: ${{ inputs.container-port }}
+          VIEWPORTS: ${{ inputs.viewports }}
+          PAGES: ${{ inputs.pages }}
+          MAX_PAGES: ${{ inputs.max-pages }}
+          THRESHOLD: ${{ inputs.threshold }}
+          HELPERS: ${{ github.workspace }}/.web-pr-rundown/actions/web/pr-rundown
+          DENYLIST: ${{ github.workspace }}/.caller/${{ inputs.denylist-file }}
+          OUT: ${{ github.workspace }}/.pr-rundown
+          GH_TOKEN: ${{ github.token }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-pr-rundown/actions/web/pr-rundown/run.ts`);
+            await run({ core, exec, github, context });
+      - name: Upload rundown.json + screenshots
+        if: always() && hashFiles('.pr-rundown/rundown.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-rundown-${{ github.event.pull_request.number }}
+          path: .pr-rundown/
+          retention-days: 14
+      - name: Publish the screenshots branch + the sticky PR comment
+        id: publish
+        if: hashFiles('.pr-rundown/rundown.json') != ''
+        env:
+          OUT: ${{ github.workspace }}/.pr-rundown
+          ASSETS_PREFIX: ${{ inputs.assets-branch-prefix }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          ARTIFACT: pr-rundown-${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-pr-rundown/actions/web/pr-rundown/publish.ts`);
+            await run({ core, exec, github, context });
+
+  prune:
+    name: 🧹 prune
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ inputs.github-actions-runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout this reusable's helpers (at the reusable's own commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ohanalabs-ai/github-platform
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .web-pr-rundown
+          sparse-checkout: |
+            actions/web/pr-rundown
+            actions/web/preview-review
+          persist-credentials: false
+      - name: Delete the PR's screenshots branch
+        env:
+          ASSETS_PREFIX: ${{ inputs.assets-branch-prefix }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { default: run } = await import(`${process.env.GITHUB_WORKSPACE}/.web-pr-rundown/actions/web/pr-rundown/prune.ts`);
+            await run({ core, exec, github, context });
