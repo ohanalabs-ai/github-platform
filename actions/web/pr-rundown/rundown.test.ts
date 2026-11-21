@@ -103,6 +103,16 @@ test("comment: sticky marker, before/after of changed sections and full pages, p
   assert.match(md, /Every page in this PR \(2 screenshots\)/);
 });
 
+test("comment: one cover screenshot of the landing page sits above the collapsed every-page grid", () => {
+  const md = renderComment(sample(), opts);
+  const cover = md.indexOf("### The landing page");
+  const grid = md.lastIndexOf("<details", md.indexOf("<summary>Every page"));
+  assert.ok(cover > 0 && cover < grid, "cover heading comes before the grid");
+  const between = md.slice(cover, grid);
+  assert.match(between, /<img src="https:\/\/x\/[^"]+" width="720" alt="\/ 1440 px \(this PR\)">/);
+  assert.ok(!between.includes("<details"), "the cover is outside any collapsed block");
+});
+
 test("comment: no baseline → head-only grid open; failures shown; long output truncated", () => {
   const r = sample({ base: null });
   const md = renderComment(r, { ...opts, failed: ["1 deny-list hit(s)"] });

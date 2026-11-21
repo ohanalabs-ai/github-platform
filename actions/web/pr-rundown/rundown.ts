@@ -207,6 +207,10 @@ export function renderComment(r: Rundown, o: RenderOpts): string {
   }
   const all = r.pages.flatMap((p) => p.views.filter((v) => v.head).map((v) => ({ p, v })));
   if (all.length) {
+    // One cover shot, always visible: the landing page ("/" or else the first page) at the widest viewport. The grid below stays collapsed.
+    const home = r.pages.find((p) => p.path === "/") ?? r.pages[0];
+    const wide = [...r.viewports].sort((a, b) => b - a).map((w) => home.views.find((v) => v.viewport === w && v.head)).find(Boolean);
+    if (wide?.head) L.push(`### The landing page`, "", img(o, wide.head, 720, `${home.path} ${wide.viewport} px (this PR)`), "");
     L.push(`<details${r.base ? "" : " open"}><summary>Every page in this PR (${all.length} screenshots)</summary>`, "", `| Page | ${r.viewports.map((w) => `${w} px`).join(" | ")} |`, `|---|${r.viewports.map(() => "---").join("|")}|`);
     for (const p of r.pages) L.push(`| <code>${esc(p.path)}</code> ${esc(p.title)} | ${r.viewports.map((w) => { const v = p.views.find((x) => x.viewport === w); return img(o, v?.head ?? null, w >= 1000 ? 220 : 120, `${p.path} ${w}`); }).join(" | ")} |`);
     L.push("", `</details>`, "");
