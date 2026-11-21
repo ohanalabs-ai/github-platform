@@ -44,6 +44,13 @@ async function settle(page: Page) {
     const step = window.innerHeight;
     for (let y = 0; y < document.documentElement.scrollHeight; y += step) { window.scrollTo(0, y); await new Promise((r) => setTimeout(r, 80)); }
     window.scrollTo(0, 0);
+    // videos that load by themselves (autoplay / preload ≠ none) must have a frame before they are parked, or one capture shows a
+    // black box and the other the frame — a false "changed"
+    await Promise.all([...document.querySelectorAll("video")].filter((v) => (v.autoplay || v.preload !== "none") && (v.currentSrc || v.src)).map((v) => new Promise<void>((done) => {
+      if (v.readyState >= 2) return done();
+      const t = setTimeout(done, 15_000); v.addEventListener("loadeddata", () => { clearTimeout(t); done(); }, { once: true });
+      if (v.preload === "none") v.load();
+    })));
     await Promise.all([...document.querySelectorAll("video")].map((v) => new Promise<void>((done) => {
       v.pause();
       if (v.readyState === 0 || v.currentTime === 0) return done();
@@ -51,7 +58,7 @@ async function settle(page: Page) {
     })));
     await document.fonts.ready;
   });
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(1000); // scroll-linked / smoothed effects settle at the top
   return page.evaluate(() => {
     const top = [...document.querySelectorAll("section")].filter((s) => !s.parentElement?.closest("section"));
     return {
@@ -75,17 +82,25 @@ async function capture(b: Browser, url: string, width: number): Promise<Cap | nu
 
 // The diff page: decode both PNGs into canvases, compare pixels, cut JPEG crops. All in Chromium — no image dependency.
 let diffPage: Page;
-interface DiffIn { head: string; base: string | null; pairs: Array<{ hy: number; hh: number; by: number; bh: number } | null>; wantFullBase: boolean }
+interface DiffIn { head: string; head2: string | null; base: string | null; pairs: Array<{ hy: number; hh: number; by: number; bh: number } | null>; wantFullBase: boolean }
 interface DiffOut { ratio: number | null; sections: Array<{ ratio: number | null; head: string | null; base: string | null }>; headJpg: string; baseJpg: string | null }
 async function diff(a: DiffIn, threshold: number): Promise<DiffOut> {
   return diffPage.evaluate(async ({ a, threshold }) => {
     const load = (src: string) => new Promise<HTMLImageElement>((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = src; });
     const canvas = (i: HTMLImageElement) => { const c = document.createElement("canvas"); c.width = i.naturalWidth; c.height = i.naturalHeight; const x = c.getContext("2d", { willReadFrequently: true })!; x.drawImage(i, 0, 0); return { c, x }; };
     const crop = (c: HTMLCanvasElement, y: number, h: number) => { const o = document.createElement("canvas"); o.width = c.width; o.height = Math.max(1, Math.min(h, c.height - y)); o.getContext("2d")!.drawImage(c, 0, y, c.width, o.height, 0, 0, c.width, o.height); return o.toDataURL("image/jpeg", 0.82); };
+    const differs = (a: Uint8ClampedArray, b: Uint8ClampedArray, i: number) => Math.abs(a[i] - b[i]) > 24 || Math.abs(a[i + 1] - b[i + 1]) > 24 || Math.abs(a[i + 2] - b[i + 2]) > 24;
+    let mask: Uint8ClampedArray | null = null; // head capture 1 vs 2: what moves on its own (animation, video, timers) is not a change
+    let maskW = 0;
     const cmp = (A: CanvasRenderingContext2D, ay: number, ah: number, B: CanvasRenderingContext2D, by: number, bh: number, w: number) => {
       const h = Math.min(ah, bh); if (h <= 0) return 1;
       const da = A.getImageData(0, ay, w, h).data, db = B.getImageData(0, by, w, h).data;
-      let n = 0; for (let i = 0; i < da.length; i += 4) if (Math.abs(da[i] - db[i]) > 24 || Math.abs(da[i + 1] - db[i + 1]) > 24 || Math.abs(da[i + 2] - db[i + 2]) > 24) n++;
+      let n = 0;
+      for (let i = 0; i < da.length; i += 4) {
+        if (!differs(da, db, i)) continue;
+        if (mask) { const px = i / 4, x = px % w, y = ay + Math.floor(px / w); if (x < maskW && mask[y * maskW + x]) continue; }
+        n++;
+      }
       return (n + w * Math.abs(ah - bh)) / (w * Math.max(ah, bh));
     };
     const H = canvas(await load(a.head));
@@ -93,6 +108,15 @@ async function diff(a: DiffIn, threshold: number): Promise<DiffOut> {
     if (!a.base) return { ratio: null, sections: a.pairs.map(() => ({ ratio: null, head: null, base: null })), headJpg, baseJpg: null };
     const B = canvas(await load(a.base));
     const w = Math.min(H.c.width, B.c.width);
+    if (a.head2) {
+      const H2 = canvas(await load(a.head2));
+      if (H2.c.width === H.c.width && H2.c.height === H.c.height) {
+        maskW = H.c.width;
+        const d1 = H.x.getImageData(0, 0, maskW, H.c.height).data, d2 = H2.x.getImageData(0, 0, maskW, H.c.height).data;
+        mask = new Uint8ClampedArray(maskW * H.c.height);
+        for (let i = 0; i < d1.length; i += 4) if (differs(d1, d2, i)) mask[i / 4] = 1;
+      }
+    }
     const ratio = cmp(H.x, 0, H.c.height, B.x, 0, B.c.height, w);
     const sections = a.pairs.map((p) => {
       if (!p) return { ratio: null, head: null, base: null };
@@ -224,9 +248,11 @@ for (const path of paths) {
     const h = await capture(browser, HEAD + path, vp);
     if (!h) continue;
     const b = BASE ? await capture(browser, BASE + path, vp) : null;
+    const h2 = b ? await capture(browser, HEAD + path, vp) : null; // the stability mask (only needed when there is a diff to make)
     const pairs = b ? pairSections(h.sections, b.sections) : h.sections.map((s) => ({ key: s.key, head: s, base: null }));
     const d = await diff({
       head: `data:image/png;base64,${h.png.toString("base64")}`,
+      head2: h2 ? `data:image/png;base64,${h2.png.toString("base64")}` : null,
       base: b ? `data:image/png;base64,${b.png.toString("base64")}` : null,
       pairs: pairs.map((p) => (p.head || p.base ? { hy: p.head?.y ?? 0, hh: p.head?.h ?? 0, by: p.base?.y ?? 0, bh: p.base?.h ?? 0 } : null)),
       wantFullBase: false,
