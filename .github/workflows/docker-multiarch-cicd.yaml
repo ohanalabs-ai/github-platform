@@ -79,6 +79,16 @@ on:
         description: Bake target service name ... Not needed if docker-compose.yaml has a single service
         required: false
         type: string
+      docker-build-target:
+        description: >-
+          Optional Dockerfile stage to build (bake `<service>.target=<stage>`), overriding the
+          service's `build.target` in the compose file. For a compose file written for local dev
+          (e.g. dockersamples/example-voting-app's `vote` builds `target: dev`) while the image to
+          publish is the Dockerfile's final stage. Empty (default) keeps the compose value, so
+          existing callers are unchanged.
+        required: false
+        type: string
+        default: ""
       image-name-suffix:
         description: >-
           Optional path suffix appended to the image base for monorepos that
@@ -412,6 +422,7 @@ jobs:
           set: |
             ${{ steps.compose-metadata.outputs.target-service }}.platform=${{ env.PLATFORMS }}
             ${{ steps.compose-metadata.outputs.target-service }}.context=${{ inputs.docker-compose-context }}
+            ${{ inputs.docker-build-target != '' && format('{0}.target={1}', steps.compose-metadata.outputs.target-service, inputs.docker-build-target) || '' }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.full_sha }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:${{ steps.vars.outputs.short_sha }}
             ${{ steps.compose-metadata.outputs.target-service }}.tags=${{ steps.vars.outputs.ghcr_image_base }}/pr/${{ steps.vars.outputs.pr }}:head-${{ steps.vars.outputs.head_sha }}
@@ -793,6 +804,7 @@ jobs:
           docker-compose-context: ${{ inputs.docker-compose-context }}
           docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
           target-service: ${{ inputs.docker-compose-target-service }}
+          build-target: ${{ inputs.docker-build-target }}
           image-base: ${{ steps.build_vars.outputs.image_base }}
           image-description: ${{ steps.build_vars.outputs.image_description }}
           tags: |
@@ -1020,6 +1032,7 @@ jobs:
           docker-compose-context: ${{ inputs.docker-compose-context }}
           docker-compose-file-name: ${{ env.DOCKER_COMPOSE_FILE_NAME }}
           target-service: ${{ inputs.docker-compose-target-service }}
+          build-target: ${{ inputs.docker-build-target }}
           image-base: ${{ steps.vars.outputs.ghcr_image_base }}
           image-description: Release build for tag ${{ steps.vars.outputs.tag }}
           tags: |
